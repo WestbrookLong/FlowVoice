@@ -1,0 +1,10 @@
+__pycache__/
+.venv/
+*.pyc
+.dart_tool/
+.packages
+build/
+*.exe
+*.zip
+*.pkg
+AGENTS.md

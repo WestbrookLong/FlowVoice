@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <link rel="icon" href="data:," />
+    <title>iPad Whiteboard Bridge for macOS</title>
+    <style>
+      :root {
+        --stage-left: 0px;
+        --stage-top: 0px;
+        --stage-width: 100vw;
+        --stage-height: 100vh;
+        --ink: #111;
+        --line: rgba(0, 0, 0, 0.14);
+        --panel: rgba(255, 255, 255, 0.94);
+      }
+
+      * {
+        box-sizing: border-box;
+        -webkit-tap-highlight-color: transparent;
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #f5f5f5;
+        color: var(--ink);
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        touch-action: none;
+        overscroll-behavior: none;
+      }
+
+      #stage {
+        position: fixed;
+        left: var(--stage-left);
+        top: var(--stage-top);
+        width: var(--stage-width);
+        height: var(--stage-height);
+        background: #fff;
+        box-shadow: 0 0 0 1px var(--line);
+        touch-action: none;
+      }
+
+      #ink {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #fff;
+        cursor: crosshair;
+        touch-action: none;
+      }
+
+      .toolbar {
+        position: fixed;
+        left: max(12px, env(safe-area-inset-left));
+        top: max(12px, env(safe-area-inset-top));
+        z-index: 5;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 6px;
+        border: 1px solid rgba(0, 0, 0, 0.1);
+        border-radius: 8px;
+        background: var(--panel);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+        backdrop-filter: blur(14px);
+      }
+
+      button {
+        min-width: 56px;
+        height: 42px;
+        border: 1px solid rgba(0, 0, 0, 0.16);
+        border-radius: 7px;
+        padding: 0 12px;
+        color: #111;
+        background: #fff;
+        font-size: 14px;
+        font-weight: 800;
+        touch-action: manipulation;
+      }
+
+      button.active {
+        color: #fff;
+        background: #111;
+      }
+
+      #clearButton {
+        color: #8a180f;
+      }
+
+      .status {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        padding: 0 6px;
+        color: #555;
+        font-size: 12px;
+        font-weight: 800;
+        white-space: nowrap;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #c51f1a;
+      }
+
+      .dot.connected {
+        background: #188038;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="stage">
+      <canvas id="ink"></canvas>
+    </main>
+    <div class="toolbar">
+      <button id="penButton" class="active" type="button">Pen</button>
+      <button id="eraserButton" type="button">Eraser</button>
+      <button id="clearButton" type="button">Clear</button>
+      <div class="status"><span id="dot" class="dot"></span><span id="status">Offline</span></div>
+    </div>
+
+    <script>
+      const stage = document.querySelector("#stage");
+      const canvas = document.querySelector("#ink");
+      const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+      const penButton = document.querySelector("#penButton");
+      const eraserButton = document.querySelector("#eraserButton");
+      const clearButton = document.querySelector("#clearButton");
+      const dot = document.querySelector("#dot");
+      const statusEl = document.querySelector("#status");
+
+      const params = new URLSearchParams(location.search);
+      const token = params.get("token") || "";
+      const previewOnly = params.get("preview") === "1";
+      const buildId = "whiteboard-engine-20260428-4";
+
+      const state = {
+        monitor: { width: 16, height: 10 },
+        tool: "pen",
+        dpr: window.devicePixelRatio || 1,
+        board: { cssLeft: 0, cssTop: 0, cssWidth: 1, cssHeight: 1, pxWidth: 1, pxHeight: 1 },
+      };
+
+      function setStatus(text, connected = false) {
+        statusEl.textContent = text;
+        statusEl.title = buildId;
+        dot.classList.toggle("connected", connected);
+      }
+
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function wsUrl() {
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const url = new URL(`${protocol}//${location.host}/pointer`);
+        url.searchParams.set("token", token);
+        return url.toString();
+      }
+
+      class PointerTransport {
+        constructor() {
+          this.ws = null;
+          this.reconnectTimer = null;
+          this.moveQueue = [];
+          this.flushTimer = null;
+          this.lastQueuedMove = null;
+          this.sequence = 0;
+        }
+
+        connect() {
+          if (previewOnly) {
+            setStatus("Mac Preview", false);
+            return;
+          }
+          if (this.ws) {
+            this.ws.close();
+          }
+          setStatus("Connecting", false);
+          let opened = false;
+          this.ws = new WebSocket(wsUrl());
+          this.ws.addEventListener("open", () => {
+            opened = true;
+            setStatus("Online", true);
+          });
+          this.ws.addEventListener("message", (event) => {
+            const message = JSON.parse(event.data);
+            if (message.type === "ready" && message.monitor) {
+              state.monitor = message.monitor;
+              resizeStage();
+            }
+          });
+          this.ws.addEventListener("close", () => {
+            setStatus(opened ? "Offline" : "Check URL", false);
+            this.scheduleReconnect();
+          });
+          this.ws.addEventListener("error", () => setStatus(opened ? "Error" : "Check URL", false));
+        }
+
+        scheduleReconnect() {
+          if (this.reconnectTimer) {
+            return;
+          }
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            this.connect();
+          }, 700);
+        }
+
+        isOpen() {
+          return this.ws && this.ws.readyState === WebSocket.OPEN;
+        }
+
+        send(message) {
+          if (!this.isOpen()) {
+            return;
+          }
+          this.ws.send(JSON.stringify(message));
+        }
+
+        eventMessage(action, point, sourceEvent) {
+          return {
+            type: "pointer",
+            action,
+            x: point.x,
+            y: point.y,
+            pressure: sourceEvent.pressure || 0,
+            pointerType: sourceEvent.pointerType || "touch",
+            pointerId: sourceEvent.pointerId,
+            seq: ++this.sequence,
+            t: Math.round(performance.now()),
+          };
+        }
+
+        sendPriority(action, point, sourceEvent) {
+          this.flushMoves();
+          this.send(this.eventMessage(action, point, sourceEvent));
+        }
+
+        sendMoveNow(point, sourceEvent) {
+          this.flushMoves();
+          this.send(this.eventMessage("move", point, sourceEvent));
+          this.lastQueuedMove = point;
+        }
+
+        queueMove(point, sourceEvent) {
+          if (!this.isOpen()) {
+            return;
+          }
+          if (this.ws.bufferedAmount > 32768) {
+            this.moveQueue.length = 0;
+            this.lastQueuedMove = null;
+            return;
+          }
+          if (
+            this.lastQueuedMove &&
+            Math.abs(this.lastQueuedMove.x - point.x) < 0.00018 &&
+            Math.abs(this.lastQueuedMove.y - point.y) < 0.00018
+          ) {
+            return;
+          }
+          this.lastQueuedMove = point;
+          this.moveQueue.push(this.eventMessage("move", point, sourceEvent));
+          if (this.moveQueue.length >= 16) {
+            this.flushMoves();
+            return;
+          }
+          if (!this.flushTimer) {
+            this.flushTimer = setTimeout(() => this.flushMoves(), 8);
+          }
+        }
+
+        flushMoves() {
+          if (this.flushTimer) {
+            clearTimeout(this.flushTimer);
+            this.flushTimer = null;
+          }
+          if (!this.moveQueue.length) {
+            return;
+          }
+          const events = this.moveQueue.splice(0, 64);
+          this.send({ type: "pointer_batch", events });
+        }
+
+        resetStrokeState() {
+          this.lastQueuedMove = null;
+        }
+      }
+
+      class StrokeEngine {
+        constructor(transport) {
+          this.transport = transport;
+          this.active = null;
+          this.lastLocalMove = null;
+        }
+
+        start(event) {
+          event.preventDefault();
+          if (!isInsideBoard(event)) {
+            return;
+          }
+          if (this.active) {
+            this.forceFinish(event);
+          }
+
+          const localPoint = canvasPoint(event);
+          const ratio = pointerRatio(event);
+          this.active = {
+            pointerId: event.pointerId,
+            tool: state.tool,
+            startPoint: localPoint,
+            startRatio: ratio,
+            lastPoint: localPoint,
+            lastRatio: ratio,
+            pathLength: 0,
+            moveCount: 0,
+            startedAt: performance.now(),
+          };
+
+          try {
+            canvas.setPointerCapture(event.pointerId);
+          } catch (_) {}
+
+          drawDot(localPoint, this.active.tool);
+          this.transport.sendPriority("down", ratio, event);
+        }
+
+        move(event) {
+          event.preventDefault();
+          if (!this.active || event.pointerId !== this.active.pointerId) {
+            return;
+          }
+          const events = event.getCoalescedEvents ? event.getCoalescedEvents() : [event];
+          for (const item of events) {
+            this.applyMove(item);
+          }
+        }
+
+        applyMove(event) {
+          if (!this.shouldUseLocalMove(event)) {
+            return;
+          }
+          const localPoint = canvasPoint(event);
+          const ratio = pointerRatio(event);
+          if (distance(this.active.lastPoint, localPoint) >= 0.35) {
+            this.active.pathLength += distance(this.active.lastPoint, localPoint);
+            drawSegment(this.active.lastPoint, localPoint, this.active.tool);
+            this.active.lastPoint = localPoint;
+          }
+          this.active.lastRatio = ratio;
+          this.active.moveCount += 1;
+          this.transport.queueMove(ratio, event);
+        }
+
+        finish(event) {
+          event.preventDefault();
+          if (!this.active || event.pointerId !== this.active.pointerId) {
+            return;
+          }
+          const finalPoint = canvasPoint(event);
+          const finalRatio = pointerRatio(event);
+          const tailDistance = distance(this.active.lastPoint, finalPoint);
+          if (tailDistance > 0.35) {
+            this.active.pathLength += tailDistance;
+            drawSegment(this.active.lastPoint, finalPoint, this.active.tool);
+            this.active.lastPoint = finalPoint;
+            this.active.lastRatio = finalRatio;
+          }
+
+          this.transport.sendPriority("up", this.active.lastRatio, event);
+          this.releaseActive();
+        }
+
+        forceFinish(event) {
+          if (!this.active) {
+            return;
+          }
+          const ratio = this.active.lastRatio || pointerRatio(event);
+          this.transport.sendPriority("up", ratio, {
+            pointerId: this.active.pointerId,
+            pointerType: event.pointerType || "touch",
+            pressure: 0,
+          });
+          this.releaseActive();
+        }
+
+        releaseActive() {
+          if (!this.active) {
+            return;
+          }
+          try {
+            canvas.releasePointerCapture(this.active.pointerId);
+          } catch (_) {}
+          this.active = null;
+          this.lastLocalMove = null;
+          this.transport.resetStrokeState();
+        }
+
+        shouldUseLocalMove(event) {
+          const now = performance.now();
+          if (
+            this.lastLocalMove &&
+            this.lastLocalMove.pointerId === event.pointerId &&
+            this.lastLocalMove.x === event.clientX &&
+            this.lastLocalMove.y === event.clientY &&
+            now - this.lastLocalMove.time < 4
+          ) {
+            return false;
+          }
+          this.lastLocalMove = {
+            pointerId: event.pointerId,
+            x: event.clientX,
+            y: event.clientY,
+            time: now,
+          };
+          return true;
+        }
+      }
+
+      const transport = new PointerTransport();
+      const engine = new StrokeEngine(transport);
+
+      function resizeStage() {
+        state.dpr = window.devicePixelRatio || 1;
+        const aspect = Math.max(0.01, state.monitor.width / Math.max(1, state.monitor.height));
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        let width = viewportWidth;
+        let height = width / aspect;
+        if (height > viewportHeight) {
+          height = viewportHeight;
+          width = height * aspect;
+        }
+        const left = (viewportWidth - width) / 2;
+        const top = (viewportHeight - height) / 2;
+
+        state.board = {
+          cssLeft: left,
+          cssTop: top,
+          cssWidth: width,
+          cssHeight: height,
+          pxWidth: Math.max(1, Math.floor(width * state.dpr)),
+          pxHeight: Math.max(1, Math.floor(height * state.dpr)),
+        };
+
+        document.documentElement.style.setProperty("--stage-left", `${left}px`);
+        document.documentElement.style.setProperty("--stage-top", `${top}px`);
+        document.documentElement.style.setProperty("--stage-width", `${width}px`);
+        document.documentElement.style.setProperty("--stage-height", `${height}px`);
+
+        if (canvas.width !== state.board.pxWidth || canvas.height !== state.board.pxHeight) {
+          const old = document.createElement("canvas");
+          old.width = canvas.width;
+          old.height = canvas.height;
+          if (old.width && old.height) {
+            old.getContext("2d").drawImage(canvas, 0, 0);
+          }
+          canvas.width = state.board.pxWidth;
+          canvas.height = state.board.pxHeight;
+          clearCanvas();
+          if (old.width && old.height) {
+            ctx.drawImage(old, 0, 0, canvas.width, canvas.height);
+          }
+        }
+      }
+
+      function clearCanvas() {
+        ctx.save();
+        ctx.globalCompositeOperation = "source-over";
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.restore();
+      }
+
+      function setTool(tool) {
+        state.tool = tool;
+        penButton.classList.toggle("active", tool === "pen");
+        eraserButton.classList.toggle("active", tool === "eraser");
+      }
+
+      function isInsideBoard(event) {
+        const rect = canvas.getBoundingClientRect();
+        return (
+          event.clientX >= rect.left &&
+          event.clientX <= rect.right &&
+          event.clientY >= rect.top &&
+          event.clientY <= rect.bottom
+        );
+      }
+
+      function canvasPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: clamp((event.clientX - rect.left) * state.dpr, 0, canvas.width),
+          y: clamp((event.clientY - rect.top) * state.dpr, 0, canvas.height),
+        };
+      }
+
+      function pointerRatio(event) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+          y: clamp((event.clientY - rect.top) / Math.max(1, rect.height), 0, 1),
+        };
+      }
+
+      function ratioFromCanvasPoint(point) {
+        return {
+          x: clamp(point.x / Math.max(1, canvas.width), 0, 1),
+          y: clamp(point.y / Math.max(1, canvas.height), 0, 1),
+        };
+      }
+
+      function distance(left, right) {
+        return Math.hypot(left.x - right.x, left.y - right.y);
+      }
+
+      function drawSegment(from, to, tool) {
+        ctx.save();
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.globalCompositeOperation = "source-over";
+        if (tool === "eraser") {
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = Math.max(22, 18 * state.dpr);
+        } else {
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = Math.max(5, 4.2 * state.dpr);
+        }
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      function drawDot(point, tool) {
+        ctx.save();
+        ctx.globalCompositeOperation = "source-over";
+        ctx.fillStyle = tool === "eraser" ? "#fff" : "#000";
+        const radius = tool === "eraser" ? Math.max(11, 9 * state.dpr) : Math.max(2.8, 2.2 * state.dpr);
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      canvas.addEventListener("pointerdown", (event) => engine.start(event), { passive: false });
+      canvas.addEventListener("pointermove", (event) => engine.move(event), { passive: false });
+      canvas.addEventListener("pointerup", (event) => engine.finish(event), { passive: false });
+      canvas.addEventListener("pointercancel", (event) => engine.finish(event), { passive: false });
+      canvas.addEventListener("lostpointercapture", (event) => engine.forceFinish(event));
+
+      penButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        setTool("pen");
+      });
+      eraserButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        setTool("eraser");
+      });
+      clearButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        clearCanvas();
+      });
+
+      for (const button of [penButton, eraserButton, clearButton]) {
+        button.addEventListener("pointerdown", (event) => event.stopPropagation());
+      }
+
+      window.addEventListener("resize", resizeStage);
+      window.addEventListener("orientationchange", () => setTimeout(resizeStage, 180));
+      window.addEventListener("blur", (event) => engine.forceFinish(event));
+      document.addEventListener("visibilitychange", (event) => {
+        if (document.hidden) {
+          engine.forceFinish(event);
+        }
+      });
+      window.addEventListener("contextmenu", (event) => event.preventDefault());
+      window.addEventListener("selectstart", (event) => event.preventDefault());
+      window.addEventListener("dragstart", (event) => event.preventDefault());
+      window.addEventListener("gesturestart", (event) => event.preventDefault());
+      window.addEventListener("gesturechange", (event) => event.preventDefault());
+      window.addEventListener("gestureend", (event) => event.preventDefault());
+
+      resizeStage();
+      clearCanvas();
+      transport.connect();
+    </script>
+  </body>
+</html>

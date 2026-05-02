@@ -1,0 +1,839 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Flow Voice</title>
+    <style>
+      :root {
+        --bg: #050807;
+        --panel: rgba(8, 16, 13, 0.9);
+        --panel-strong: #06100b;
+        --line: #1e3b2b;
+        --line-strong: #2c6241;
+        --text: #dde7df;
+        --text-strong: #f2fff7;
+        --muted: #8ea99a;
+        --dim: #5b7062;
+        --accent: #28f58d;
+        --accent-soft: #10291b;
+        --warn: #d7c47a;
+        --warn-bg: rgba(22, 19, 8, 0.75);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        overflow: hidden;
+        color: var(--text);
+        background: var(--bg);
+        font-family: "SF Pro Text", "Helvetica Neue", "PingFang SC", system-ui, sans-serif;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      button:disabled,
+      input:disabled {
+        cursor: not-allowed;
+        opacity: 0.52;
+      }
+
+      .app {
+        position: relative;
+        display: flex;
+        height: 100vh;
+        min-width: 980px;
+        overflow: hidden;
+        background: #050807;
+      }
+
+      .backdrop {
+        pointer-events: none;
+        position: fixed;
+        inset: 0;
+      }
+
+      .glow-a,
+      .glow-b {
+        position: absolute;
+        border-radius: 999px;
+        filter: blur(96px);
+      }
+
+      .glow-a {
+        left: -120px;
+        top: -120px;
+        width: 460px;
+        height: 460px;
+        background: rgba(12, 255, 136, 0.1);
+      }
+
+      .glow-b {
+        right: -120px;
+        bottom: -180px;
+        width: 560px;
+        height: 560px;
+        background: rgba(31, 164, 99, 0.18);
+      }
+
+      .sweep {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(135deg, rgba(10, 255, 136, 0.08), transparent 34%, rgba(9, 21, 16, 0.95) 70%);
+      }
+
+      .grid {
+        position: absolute;
+        inset: 0;
+        opacity: 0.045;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.6) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.6) 1px, transparent 1px);
+        background-size: 36px 36px;
+      }
+
+      .content {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        min-height: 0;
+        width: 100%;
+        flex-direction: column;
+      }
+
+      .titlebar {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        height: 44px;
+        flex: 0 0 auto;
+        align-items: center;
+        border-bottom: 1px solid #173524;
+        background: rgba(5, 8, 7, 0.96);
+        box-shadow: 0 1px 0 rgba(40, 245, 141, 0.08);
+      }
+
+      .titlebar-brand {
+        display: flex;
+        height: 100%;
+        align-items: center;
+        gap: 12px;
+        padding: 0 16px;
+        -webkit-app-region: drag;
+      }
+
+      .logo {
+        display: grid;
+        width: 28px;
+        height: 28px;
+        place-items: center;
+        border: 1px solid rgba(40, 245, 141, 0.25);
+        border-radius: 8px;
+        color: #80ffba;
+        background: #0b1d14;
+        box-shadow: 0 0 18px rgba(40, 245, 141, 0.12);
+        font: 900 10px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      }
+
+      .brand-text {
+        color: rgba(139, 255, 186, 0.75);
+        font: 700 11px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+      }
+
+      .drag-region {
+        height: 100%;
+        min-width: 0;
+        flex: 1;
+        -webkit-app-region: drag;
+      }
+
+      .window-controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        height: 100%;
+        padding: 0 16px;
+        -webkit-app-region: no-drag;
+      }
+
+      .window-controls button {
+        position: relative;
+        display: block;
+        width: 12px;
+        height: 12px;
+        border: 0;
+        border-radius: 999px;
+        padding: 0;
+        color: transparent;
+        font-size: 0;
+        box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.24);
+      }
+
+      .window-controls button:hover {
+        filter: brightness(1.08);
+      }
+
+      .window-controls button.close {
+        background: #ff5f57;
+      }
+
+      .window-controls button.minimize {
+        background: #febc2e;
+      }
+
+      .window-controls button.maximize {
+        background: #28c840;
+      }
+
+      main {
+        display: flex;
+        min-height: 0;
+        width: 100%;
+        max-width: 1160px;
+        flex: 1;
+        flex-direction: column;
+        margin: 0 auto;
+        padding: 22px 32px 28px;
+        overflow: hidden;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 20px;
+      }
+
+      .heading {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+
+      .heading .logo {
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        font-size: 14px;
+        box-shadow: 0 0 32px rgba(40, 245, 141, 0.15);
+      }
+
+      .eyebrow {
+        color: rgba(116, 231, 165, 0.72);
+        font: 700 11px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+        letter-spacing: 0.35em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        margin-top: 8px;
+        color: var(--text-strong);
+        font-size: 25px;
+        font-weight: 650;
+        letter-spacing: 0;
+      }
+
+      .header-status {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .endpoint-label {
+        color: var(--dim);
+        font: 500 12px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid #285c3b;
+        border-radius: 12px;
+        padding: 10px 14px;
+        color: #6c8a75;
+        background: #0c1e14;
+        box-shadow: 0 0 26px rgba(40, 245, 141, 0.15);
+        font: 700 12px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .badge-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #5b7062;
+      }
+
+      .badge.running {
+        border-color: rgba(40, 245, 141, 0.35);
+        color: #8bffba;
+        background: #0d2a19;
+      }
+
+      .badge.running .badge-dot {
+        background: var(--accent);
+        box-shadow: 0 0 14px rgba(40, 245, 141, 0.9);
+      }
+
+      .layout {
+        display: grid;
+        min-height: 0;
+        flex: 1;
+        grid-template-columns: minmax(0, 2fr) minmax(320px, 0.9fr);
+        gap: 20px;
+      }
+
+      .panel {
+        min-height: 0;
+        border: 1px solid var(--line);
+        border-radius: 26px;
+        background: var(--panel);
+        box-shadow: 0 26px 80px rgba(0, 0, 0, 0.5);
+        backdrop-filter: blur(18px);
+      }
+
+      .main-panel {
+        padding: 20px;
+        overflow: auto;
+      }
+
+      .panel-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 16px;
+      }
+
+      .pill {
+        display: inline-flex;
+        border: 1px solid rgba(40, 245, 141, 0.2);
+        border-radius: 999px;
+        padding: 6px 12px;
+        color: #7bffb5;
+        background: #10271b;
+        font: 700 11px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+      }
+
+      h2 {
+        margin-top: 12px;
+        color: var(--text-strong);
+        font-size: 28px;
+        font-weight: 650;
+        line-height: 1.12;
+        letter-spacing: 0;
+      }
+
+      .body-copy {
+        max-width: 620px;
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.45;
+      }
+
+      .url-box {
+        border: 1px solid #21462f;
+        border-radius: 22px;
+        padding: 16px;
+        background: linear-gradient(135deg, #0d2116, #09140f 55%, #07100b);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      }
+
+      .url-box[hidden] {
+        display: none;
+      }
+
+      .url-head,
+      .url-row,
+      .inline-fields,
+      .actions {
+        display: flex;
+        align-items: center;
+      }
+
+      .url-head {
+        justify-content: space-between;
+        margin-bottom: 10px;
+        color: #ddfce7;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .url-head span {
+        color: #60836e;
+        font: 500 11px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      }
+
+      .url-row {
+        gap: 12px;
+        border: 1px solid #2c6241;
+        border-radius: 16px;
+        padding: 10px;
+        background: #030805;
+      }
+
+      code {
+        min-width: 0;
+        overflow: hidden;
+        color: #b9ffd4;
+        font: 500 13px/1.35 ui-monospace, "SFMono-Regular", Menlo, monospace;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .url-row code {
+        flex: 1;
+        padding: 0 10px;
+      }
+
+      .btn {
+        min-height: 38px;
+        border: 1px solid #2e7447;
+        border-radius: 12px;
+        padding: 0 15px;
+        color: #b9ffd4;
+        background: #10291b;
+        font-size: 12px;
+        font-weight: 750;
+        transition: 120ms ease;
+      }
+
+      .btn:hover {
+        background: #163a26;
+      }
+
+      .btn.primary {
+        border-color: transparent;
+        color: #041008;
+        background: var(--accent);
+        box-shadow: 0 0 28px rgba(40, 245, 141, 0.24);
+      }
+
+      .btn.primary:hover {
+        background: #67ffad;
+      }
+
+      .btn.full {
+        width: 100%;
+        min-height: 48px;
+        border-radius: 16px;
+        font-size: 14px;
+      }
+
+      .inline-fields {
+        flex-wrap: wrap;
+        gap: 10px 18px;
+        margin-top: 14px;
+        color: var(--dim);
+        font: 600 11px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      }
+
+      .inline-fields strong {
+        color: #9be7b6;
+        font-weight: 600;
+      }
+
+      .inline-fields input {
+        height: 28px;
+        border: 1px solid #21462f;
+        border-radius: 7px;
+        outline: none;
+        padding: 0 8px;
+        color: #9be7b6;
+        background: #06100b;
+        font-weight: 600;
+      }
+
+      .port-input {
+        width: 70px;
+      }
+
+      .token-input {
+        width: 210px;
+      }
+
+      .info-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        margin-top: 16px;
+      }
+
+      .thin-info,
+      .message,
+      .warning,
+      .session {
+        border: 1px solid #193324;
+        border-radius: 16px;
+        background: rgba(6, 16, 11, 0.8);
+      }
+
+      .thin-info {
+        padding: 14px 16px;
+      }
+
+      .thin-info-label {
+        color: var(--dim);
+        font: 700 10px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+      }
+
+      .thin-info-value {
+        margin-top: 8px;
+        color: #c8e7d2;
+        font-size: 14px;
+      }
+
+      .message,
+      .warning {
+        margin-top: 16px;
+        padding: 13px 16px;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .message {
+        color: #a8f7c4;
+      }
+
+      .warning {
+        border-color: #2f2a17;
+        color: var(--warn);
+        background: var(--warn-bg);
+      }
+
+      .side-panel {
+        display: flex;
+        flex-direction: column;
+        padding: 20px;
+      }
+
+      .quick {
+        text-align: center;
+      }
+
+      .quick-line {
+        width: 64px;
+        height: 4px;
+        margin: 0 auto 12px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, transparent, var(--accent), transparent);
+        opacity: 0.85;
+      }
+
+      .quick h2 {
+        margin: 0;
+        font-size: 21px;
+      }
+
+      .quick p {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .qr-frame {
+        width: 100%;
+        max-width: 260px;
+        margin: 18px auto 0;
+        border: 1px solid #2c6241;
+        border-radius: 28px;
+        padding: 12px;
+        background: linear-gradient(135deg, #153321, #06100b);
+        box-shadow: 0 0 60px rgba(40, 245, 141, 0.13);
+      }
+
+      .qr-inner {
+        border-radius: 20px;
+        padding: 12px;
+        background: #fff;
+      }
+
+      .qr-inner img {
+        display: block;
+        width: 100%;
+        height: auto;
+        aspect-ratio: 1;
+      }
+
+      .session {
+        margin-top: 16px;
+        padding: 16px;
+      }
+
+      .session-label {
+        margin-bottom: 10px;
+        color: var(--dim);
+        font: 700 10px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+      }
+
+      .session hr {
+        height: 1px;
+        border: 0;
+        margin: 14px 0;
+        background: #193324;
+      }
+
+      .actions {
+        gap: 10px;
+        margin-top: auto;
+        padding-top: 18px;
+      }
+
+      @media (max-width: 1080px) {
+        .app {
+          min-width: 0;
+        }
+
+        main {
+          overflow: auto;
+        }
+
+        .layout {
+          grid-template-columns: 1fr;
+          overflow: visible;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <div class="backdrop">
+        <div class="glow-a"></div>
+        <div class="glow-b"></div>
+        <div class="sweep"></div>
+        <div class="grid"></div>
+      </div>
+
+      <div class="content">
+        <div class="titlebar">
+          <div class="window-controls">
+            <button id="close" class="close" type="button" title="Close">×</button>
+            <button id="minimize" class="minimize" type="button" title="Minimize">-</button>
+            <button id="maximize" class="maximize" type="button" title="Maximize / Restore">□</button>
+          </div>
+          <div class="drag-region"></div>
+          <div class="titlebar-brand">
+            <div class="logo">FV</div>
+            <div class="brand-text">Flow Voice</div>
+          </div>
+        </div>
+
+        <main>
+          <header>
+            <div class="heading">
+              <div class="logo">FV</div>
+              <div>
+                <div class="eyebrow">Flow Voice macOS</div>
+                <h1>Desktop Connection Console</h1>
+              </div>
+            </div>
+            <div class="header-status">
+              <span id="endpointLabel" class="endpoint-label">127.0.0.1:8787</span>
+              <div id="serviceBadge" class="badge">
+                <span class="badge-dot"></span>
+                <span id="serviceBadgeText">Service Stopped</span>
+              </div>
+            </div>
+          </header>
+
+          <section class="layout">
+            <section class="panel main-panel">
+              <div class="panel-top">
+                <div>
+                  <div class="pill">Mobile Input Endpoint</div>
+                  <h2>Scan, open, and start dictating.</h2>
+                  <p class="body-copy">
+                    Use your phone as a voice input surface. The recognized text will be written to the active cursor on this Mac.
+                  </p>
+                </div>
+              </div>
+
+              <div id="urlBox" class="url-box" hidden>
+                <div class="url-head">
+                  <div>Open this URL on your phone</div>
+                  <span id="urlMode">Token included</span>
+                </div>
+                <div class="url-row">
+                  <code id="activeUrl">Loading...</code>
+                  <button id="copyUrl" class="btn" type="button">Copy URL</button>
+                  <button id="openUrl" class="btn primary" type="button">Open</button>
+                </div>
+
+              </div>
+
+              <div class="info-grid">
+                <div class="thin-info">
+                  <div class="thin-info-label">Status</div>
+                  <div id="statusInfo" class="thin-info-value">Service is stopped</div>
+                </div>
+                <div class="thin-info">
+                  <div class="thin-info-label">Public Tunnel</div>
+                  <div id="tunnelInfo" class="thin-info-value">PUBLIC OFFLINE</div>
+                </div>
+              </div>
+
+              <div id="message" class="message" hidden></div>
+
+              <div class="warning">
+                Before using it, put the Mac cursor in the target text field. macOS may require Accessibility and Input Monitoring permission for Terminal, Python, or this app.
+              </div>
+            </section>
+
+            <aside class="panel side-panel">
+              <div class="quick">
+                <div class="quick-line"></div>
+                <h2>Quick Connect</h2>
+                <p>Scan this QR code from your phone.</p>
+              </div>
+
+              <div class="qr-frame">
+                <div class="qr-inner">
+                  <img id="qrImage" alt="Connection QR code" />
+                </div>
+              </div>
+
+              <div class="session">
+                <div class="session-label">Bound Session</div>
+                <code id="sessionToken">loading</code>
+                <hr />
+                <code id="sessionEndpoint">127.0.0.1:8787</code>
+              </div>
+
+              <div class="actions">
+                <button id="toggleService" class="btn primary full" type="button">Start Service</button>
+              </div>
+            </aside>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <script>
+      const fallbackState = {
+        running: false,
+        tunnelRunning: false,
+        token: "loading",
+        ip: "127.0.0.1",
+        port: "8787",
+        url: "",
+        publicUrl: "",
+        activeUrl: "",
+        qrDataUrl: "",
+        status: "SERVICE STOPPED",
+        tunnelStatus: "PUBLIC OFFLINE",
+      };
+
+      let state = { ...fallbackState };
+      let messageTimer = null;
+
+      const $ = (id) => document.getElementById(id);
+
+      function api() {
+        return window.pywebview && window.pywebview.api;
+      }
+
+      function setMessage(text) {
+        const el = $("message");
+        window.clearTimeout(messageTimer);
+        if (!text) {
+          el.hidden = true;
+          el.textContent = "";
+          return;
+        }
+        el.hidden = false;
+        el.textContent = text;
+        messageTimer = window.setTimeout(() => setMessage(""), 5200);
+      }
+
+      function render(nextState) {
+        state = { ...fallbackState, ...nextState };
+        const activeUrl = state.activeUrl || state.publicUrl || state.url;
+        const endpoint = `${state.ip}:${state.port}`;
+
+        $("endpointLabel").textContent = endpoint;
+        $("urlBox").hidden = !state.running;
+        $("activeUrl").textContent = activeUrl || "Not ready";
+        $("urlMode").textContent = state.publicUrl ? "Public tunnel active" : "Token included";
+        $("statusInfo").textContent = state.running ? "Listening for mobile input" : "Service is stopped";
+        $("tunnelInfo").textContent = state.tunnelStatus;
+        $("sessionToken").textContent = state.token;
+        $("sessionEndpoint").textContent = endpoint;
+        $("qrImage").src = state.qrDataUrl || "";
+
+        $("serviceBadge").classList.toggle("running", state.running);
+        $("serviceBadgeText").textContent = state.running ? "Service Started" : "Service Stopped";
+        $("toggleService").textContent = state.running ? "Stop Service" : "Start Service";
+        $("toggleService").classList.toggle("primary", !state.running);
+      }
+
+      async function refresh() {
+        const desktop = api();
+        if (!desktop) {
+          return;
+        }
+        render(await desktop.get_state());
+      }
+
+      async function call(action, payload) {
+        const desktop = api();
+        if (!desktop) {
+          setMessage("Desktop API is not ready.");
+          return;
+        }
+        try {
+          const method = desktop[action];
+          const result = payload === undefined ? await method() : await method(payload);
+          render(result.state);
+          setMessage(result.message || "");
+        } catch (error) {
+          setMessage(`Desktop API error: ${error && error.message ? error.message : error}`);
+        }
+      }
+
+      $("minimize").addEventListener("click", () => call("minimize_window"));
+      $("maximize").addEventListener("click", () => call("toggle_maximize_window"));
+      $("close").addEventListener("click", () => call("close_window"));
+      $("copyUrl").addEventListener("click", () => call("copy_url"));
+      $("openUrl").addEventListener("click", () => call("open_url"));
+      $("toggleService").addEventListener("click", () => call(state.running ? "stop_service" : "start_service"));
+
+      window.addEventListener("pywebviewready", refresh);
+      window.setInterval(refresh, 700);
+      render(fallbackState);
+      refresh();
+    </script>
+  </body>
+</html>
