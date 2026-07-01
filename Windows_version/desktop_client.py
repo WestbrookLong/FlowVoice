@@ -936,24 +936,6 @@ class DesktopApi:
     def get_state(self) -> dict:
         with self.lock:
             running = self._running()
-            voice_snapshot = (
-                self.desktop_voice_thread.snapshot()
-                if self.desktop_voice_thread is not None
-                else {
-                    "running": False,
-                    "paused": False,
-                    "status": "STOPPED",
-                    "error": None,
-                    "modelPath": str(desktop_voice_model_path()),
-                    "engine": self.desktop_voice_config["engine"],
-                    "funasrMode": self.desktop_voice_config["funasrMode"],
-                    "funasrModel": self.desktop_voice_config["funasrModel"],
-                    "baiduDevPid": self.desktop_voice_config.get("baiduDevPid", DEFAULT_BAIDU_DEV_PID),
-                    "activeModel": self._desktop_voice_active_model_name(),
-                    "finalRescoreModel": self._desktop_voice_final_rescore_model_name(),
-                    "streamingChunkMs": self.desktop_voice_config.get("funasrStreamingChunkMs", 600),
-                }
-            )
             return {
                 "running": running,
                 "token": self.token,
@@ -961,15 +943,6 @@ class DesktopApi:
                 "port": self.port,
                 "url": self._url(),
                 "status": "SERVICE STARTED" if running else "SERVICE STOPPED",
-                "desktopVoice": voice_snapshot,
-                "desktopVoiceSettings": self._desktop_voice_settings_snapshot(),
-                "textAgent": self.text_agent.get_state(),
-                "textAgentStyle": self.text_agent_style,
-                "textAgentHotkey": {
-                    "registered": self.text_agent_hotkey_thread is not None and self.text_agent_hotkey_thread.error is None,
-                    "error": self.text_agent_hotkey_thread.error if self.text_agent_hotkey_thread is not None else None,
-                    "label": "Ctrl+Alt+Space",
-                },
                 "inputGate": self.input_gate.snapshot(),
                 "inputGateHotkey": {
                     "registered": self.input_gate_hotkey_thread is not None and self.input_gate_hotkey_thread.error is None,
@@ -1354,18 +1327,6 @@ class DesktopApi:
         self.typing_stats.close()
 
     def start_hotkeys(self) -> None:
-        if self.text_agent_hotkey_thread is None:
-            def callback() -> None:
-                self.show_agent_float()
-                self.toggle_text_agent_recording()
-
-            thread = TextAgentHotkeyThread(callback)
-            self.text_agent_hotkey_thread = thread
-            thread.start()
-            thread.ready.wait(timeout=2)
-            if thread.error:
-                log(f"[text-agent] hotkey unavailable: {thread.error}")
-
         if self.input_gate_hotkey_thread is None:
             thread = TextAgentHotkeyThread(
                 self.toggle_input_pause,
@@ -1888,7 +1849,6 @@ def main() -> None:
     def on_main_window_loaded() -> None:
         log("[desktop] main window loaded")
         apply_window_chrome(window)
-        threading.Timer(0.8, create_agent_window).start()
         threading.Timer(0.2, create_input_toast_window).start()
 
     window.events.loaded += on_main_window_loaded

@@ -49,6 +49,9 @@ class FlowVoicePage extends StatefulWidget {
 
 class _FlowVoicePageState extends State<FlowVoicePage>
     with WidgetsBindingObserver {
+  static const MethodChannel _overlayChannel =
+      MethodChannel('flowvoice/overlay');
+
   final TextEditingController _urlController = TextEditingController();
   final TextEditingController _hostController = TextEditingController();
   final TextEditingController _tokenController = TextEditingController();
@@ -68,6 +71,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   bool _settingsOpen = false;
   bool _scannerOpen = false;
   bool _recentlyTyping = false;
+  bool _overlayUpdatingInput = false;
+  bool _overlayPermissionPrompted = false;
   Timer? _reconnectTimer;
   Timer? _typingIdleTimer;
   final List<Map<String, Object?>> _queue = <Map<String, Object?>>[];
@@ -76,8 +81,12 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _overlayChannel.setMethodCallHandler(_handleOverlayCall);
     _inputController.addListener(_handleInputChanged);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _focusInputSoon());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _focusInputSoon();
+      _prepareOverlayPermission();
+    });
   }
 
   @override
@@ -85,6 +94,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     WidgetsBinding.instance.removeObserver(this);
     _reconnectTimer?.cancel();
     _typingIdleTimer?.cancel();
+    _overlayChannel.setMethodCallHandler(null);
+    _stopFloatingInput();
     _socket?.close();
     _urlController.dispose();
     _hostController.dispose();
@@ -97,7 +108,72 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _stopFloatingInput();
       _focusInputSoon(delay: const Duration(milliseconds: 260));
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _startFloatingInput();
+    }
+  }
+
+  Future<dynamic> _handleOverlayCall(MethodCall call) async {
+    if (call.method != 'overlayTextChanged') {
+      return null;
+    }
+    final text = call.arguments is String ? call.arguments as String : '';
+    if (_inputController.text == text) {
+      return null;
+    }
+    _overlayUpdatingInput = true;
+    _inputController.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    _overlayUpdatingInput = false;
+    _markRecentlyTyping();
+    _syncInput();
+    return null;
+  }
+
+  Future<void> _prepareOverlayPermission() async {
+    if (!Platform.isAndroid || _overlayPermissionPrompted) {
+      return;
+    }
+    _overlayPermissionPrompted = true;
+    try {
+      final granted =
+          await _overlayChannel.invokeMethod<bool>('hasOverlayPermission') ??
+              false;
+      if (!granted) {
+        await _overlayChannel.invokeMethod<void>('requestOverlayPermission');
+      }
+    } catch (_) {
+      // Overlay is an optional Android enhancement; normal foreground input still works.
+    }
+  }
+
+  Future<void> _startFloatingInput() async {
+    if (!Platform.isAndroid || _settingsOpen || _scannerOpen) {
+      return;
+    }
+    try {
+      await _overlayChannel.invokeMethod<void>('startOverlay', <String, Object?>{
+        'text': _inputController.text,
+        'connected': _status == BridgeStatus.connected,
+      });
+    } catch (_) {
+      // Some ROMs may deny overlays or background input. Foreground input remains available.
+    }
+  }
+
+  Future<void> _stopFloatingInput() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      await _overlayChannel.invokeMethod<void>('stopOverlay');
+    } catch (_) {
+      // Best effort cleanup only.
     }
   }
 
@@ -114,6 +190,9 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   }
 
   void _handleInputChanged() {
+    if (_overlayUpdatingInput) {
+      return;
+    }
     _markRecentlyTyping();
     _syncInput();
   }

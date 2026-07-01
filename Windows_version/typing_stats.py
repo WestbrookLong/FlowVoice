@@ -63,6 +63,9 @@ class TypingStats:
                 cursor += timedelta(days=1)
             return {"total": mobile + computer, "mobile": mobile, "computer": computer}
 
+        all_time_mobile = sum(int(value.get("mobile", 0)) for value in days.values())
+        all_time_computer = sum(int(value.get("computer", 0)) for value in days.values())
+
         history = []
         cursor = history_start
         while cursor <= current_day:
@@ -80,6 +83,11 @@ class TypingStats:
             cursor += timedelta(days=1)
 
         return {
+            "allTime": {
+                "total": all_time_mobile + all_time_computer,
+                "mobile": all_time_mobile,
+                "computer": all_time_computer,
+            },
             "today": totals_between(current_day, current_day),
             "week": totals_between(week_start, current_day),
             "month": totals_between(month_start, current_day),
