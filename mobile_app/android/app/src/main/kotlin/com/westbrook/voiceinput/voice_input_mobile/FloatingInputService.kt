@@ -136,7 +136,9 @@ class FloatingInputService : Service() {
             dp(39),
             dp(39),
             overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -161,6 +163,10 @@ class FloatingInputService : Service() {
             val layoutParams = params ?: return@setOnTouchListener false
             val manager = windowManager ?: return@setOnTouchListener false
             when (event.actionMasked) {
+                MotionEvent.ACTION_OUTSIDE -> {
+                    releaseInputFocus(input)
+                    true
+                }
                 MotionEvent.ACTION_DOWN -> {
                     startX = layoutParams.x
                     startY = layoutParams.y
@@ -192,6 +198,7 @@ class FloatingInputService : Service() {
     }
 
     private fun focusInput(input: EditText) {
+        setOverlayFocusable(true)
         input.isFocusable = true
         input.isFocusableInTouchMode = true
         input.requestFocus()
@@ -199,6 +206,26 @@ class FloatingInputService : Service() {
             val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
             imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
         }, 80)
+    }
+
+    private fun releaseInputFocus(input: EditText) {
+        input.clearFocus()
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.hideSoftInputFromWindow(input.windowToken, 0)
+        setOverlayFocusable(false)
+    }
+
+    private fun setOverlayFocusable(focusable: Boolean) {
+        val root = overlayView ?: return
+        val layoutParams = params ?: return
+        val manager = windowManager ?: return
+        val notFocusable = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        layoutParams.flags = if (focusable) {
+            layoutParams.flags and notFocusable.inv()
+        } else {
+            layoutParams.flags or notFocusable
+        }
+        manager.updateViewLayout(root, layoutParams)
     }
 
     private fun updateIndicator(connected: Boolean) {
