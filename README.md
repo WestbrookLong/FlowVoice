@@ -7,18 +7,28 @@ FlowVoice 是一个远程语音输入工具：手机负责语音识别，电脑�
 ## 适合什么场景
 
 - 在电脑上写文档、聊天、填表时，用手机语音输入长段文字。
+- 在图书馆、办公室等比较安静的场合，可以将手机凑近，轻声输入
 - 电脑没有好用麦克风，或者电脑端语音输入不好用时，用手机输入法替代。
 - 不想安装复杂账号体系，只想在自己的设备之间快速输入文字。
+
+Windows 和 macOS 版本都可以直接下载已有的 release 版本使用，也可以按照下面的方法自行配置源码环境。
 
 ## 基本用法
 
 1. 在电脑上启动 FlowVoice。
 2. 在电脑窗口中点击启动服务。
+
+![FlowVoice 桌面端启动服务后的连接窗口](docs/assets/readme/desktop-console.png)
+
 3. 用手机扫描二维码，或在手机浏览器打开窗口里的连接地址。
 4. 把电脑光标放到要输入的位置。
-5. 在手机页面输入文字，或直接使用手机输入法的语音输入。
+5. 在手机页面输入文字
+
+<img src="docs/assets/readme/mobile-input.jpg" alt="手机端输入页面" height="272">
 
 手机端不需要点击发送。只要手机输入框内容变化，电脑端就会同步输入。
+
+![电脑端同步输入结果](docs/assets/readme/desktop-result.png)
 
 ## Windows 版
 
@@ -115,7 +125,7 @@ macOS 可能会拦截模拟键盘输入。如果手机已经连接，但 Mac 没
 
 macOS 桌面客户端支持通过 Cloudflare Tunnel 生成临时公网地址。适合手机和 Mac 不在同一个局域网时使用。
 
-安装 `cloudflared` 后启动 FlowVoice，窗口会尝试生成公网 URL。公网地址通常是 `trycloudflare.com` 域名，并且会带上本次会话的 `token`。
+安装 `cloudflared`（brew install cloudflare）后启动 FlowVoice，窗口会尝试生成公网 URL。公网地址通常是 `trycloudflare.com` 域名，并且会带上本次会话的 `token`。
 
 注意：
 
