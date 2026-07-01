@@ -9,6 +9,11 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    override fun onResume() {
+        super.onResume()
+        stopFloatingOverlay()
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         overlayChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, OVERLAY_CHANNEL)
@@ -34,9 +39,11 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "stopOverlay" -> {
-                    val intent = Intent(this, FloatingInputService::class.java)
-                        .setAction(FloatingInputService.ACTION_STOP)
-                    startService(intent)
+                    stopFloatingOverlay()
+                    result.success(null)
+                }
+                "sendToBackground" -> {
+                    moveTaskToBack(true)
                     result.success(null)
                 }
                 else -> result.notImplemented()
@@ -64,6 +71,12 @@ class MainActivity : FlutterActivity() {
         )
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         startActivity(intent)
+    }
+
+    private fun stopFloatingOverlay() {
+        val intent = Intent(this, FloatingInputService::class.java)
+            .setAction(FloatingInputService.ACTION_STOP)
+        startService(intent)
     }
 
     companion object {

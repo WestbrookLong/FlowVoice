@@ -72,7 +72,6 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   bool _scannerOpen = false;
   bool _recentlyTyping = false;
   bool _overlayUpdatingInput = false;
-  bool _overlayPermissionPrompted = false;
   Timer? _reconnectTimer;
   Timer? _typingIdleTimer;
   final List<Map<String, Object?>> _queue = <Map<String, Object?>>[];
@@ -83,10 +82,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     WidgetsBinding.instance.addObserver(this);
     _overlayChannel.setMethodCallHandler(_handleOverlayCall);
     _inputController.addListener(_handleInputChanged);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _focusInputSoon();
-      _prepareOverlayPermission();
-    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _focusInputSoon(force: true));
   }
 
   @override
@@ -109,10 +105,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _stopFloatingInput();
-      _focusInputSoon(delay: const Duration(milliseconds: 260));
-    } else if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.hidden) {
-      _startFloatingInput();
+      _focusInputSoon(delay: const Duration(milliseconds: 260), force: true);
     }
   }
 
@@ -135,34 +128,38 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     return null;
   }
 
-  Future<void> _prepareOverlayPermission() async {
-    if (!Platform.isAndroid || _overlayPermissionPrompted) {
-      return;
+  Future<bool> _startFloatingInput() async {
+    if (!Platform.isAndroid || _settingsOpen || _scannerOpen) {
+      return false;
     }
-    _overlayPermissionPrompted = true;
     try {
       final granted =
           await _overlayChannel.invokeMethod<bool>('hasOverlayPermission') ??
               false;
       if (!granted) {
         await _overlayChannel.invokeMethod<void>('requestOverlayPermission');
+        return false;
       }
-    } catch (_) {
-      // Overlay is an optional Android enhancement; normal foreground input still works.
-    }
-  }
-
-  Future<void> _startFloatingInput() async {
-    if (!Platform.isAndroid || _settingsOpen || _scannerOpen) {
-      return;
-    }
-    try {
-      await _overlayChannel.invokeMethod<void>('startOverlay', <String, Object?>{
+      final started =
+          await _overlayChannel.invokeMethod<bool>('startOverlay', <String, Object?>{
         'text': _inputController.text,
         'connected': _status == BridgeStatus.connected,
       });
+      return started ?? false;
     } catch (_) {
-      // Some ROMs may deny overlays or background input. Foreground input remains available.
+      return false;
+    }
+  }
+
+  Future<void> _openFloatingInput() async {
+    final started = await _startFloatingInput();
+    if (!started) {
+      return;
+    }
+    try {
+      await _overlayChannel.invokeMethod<void>('sendToBackground');
+    } catch (_) {
+      SystemNavigator.pop();
     }
   }
 
@@ -179,13 +176,23 @@ class _FlowVoicePageState extends State<FlowVoicePage>
 
   void _focusInputSoon({
     Duration delay = const Duration(milliseconds: 180),
+    bool force = false,
   }) {
     Future<void>.delayed(delay, () {
       if (!mounted || _settingsOpen || _scannerOpen) {
         return;
       }
+      if (force) {
+        _inputFocusNode.unfocus();
+        SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+      }
       FocusScope.of(context).requestFocus(_inputFocusNode);
-      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+      Future<void>.delayed(const Duration(milliseconds: 40), () {
+        if (!mounted || _settingsOpen || _scannerOpen) {
+          return;
+        }
+        SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+      });
     });
   }
 
@@ -485,6 +492,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                         _convertSpokenPunctuation ||
                         _enableVoiceCommands,
                     onSettings: _openSettings,
+                    onFloatingInput: _openFloatingInput,
                     onScan: _scanQrCode,
                   ),
                 ),
@@ -633,6 +641,7 @@ class _Header extends StatelessWidget {
     required this.statusText,
     required this.settingsActive,
     required this.onSettings,
+    required this.onFloatingInput,
     required this.onScan,
   });
 
@@ -640,6 +649,7 @@ class _Header extends StatelessWidget {
   final String statusText;
   final bool settingsActive;
   final VoidCallback onSettings;
+  final VoidCallback onFloatingInput;
   final VoidCallback onScan;
 
   @override
@@ -653,6 +663,12 @@ class _Header extends StatelessWidget {
           icon: Icons.settings,
           active: settingsActive,
           onPressed: onSettings,
+        ),
+        const SizedBox(width: 16),
+        _RoundIconButton(
+          icon: Icons.picture_in_picture_alt,
+          active: false,
+          onPressed: onFloatingInput,
         ),
         const SizedBox(width: 16),
         _RoundIconButton(
@@ -721,7 +737,7 @@ class _RoundIconButton extends StatelessWidget {
       onTap: onPressed,
       child: Icon(
         icon,
-        size: 31,
+        size: 25,
         color: const Color(0xFF050505),
       ),
     );
@@ -744,19 +760,19 @@ class _PixelButtonFrame extends StatelessWidget {
     return Material(
       color: Colors.transparent,
       child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(18),
+          onTap: onTap,
+        borderRadius: BorderRadius.circular(15),
         child: Container(
-          width: 66,
-          height: 66,
+          width: 54,
+          height: 54,
           decoration: BoxDecoration(
             color: active ? const Color(0xFFF4FFF8) : Colors.white,
-            border: Border.all(color: const Color(0xFF111111), width: 3),
-            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFF111111), width: 2.5),
+            borderRadius: BorderRadius.circular(15),
             boxShadow: const <BoxShadow>[
               BoxShadow(
                 color: Color(0xFF111111),
-                offset: Offset(4, 4),
+                offset: Offset(3, 3),
                 blurRadius: 0,
               ),
             ],

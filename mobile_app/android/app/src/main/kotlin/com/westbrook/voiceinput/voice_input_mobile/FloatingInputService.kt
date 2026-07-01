@@ -82,19 +82,32 @@ class FloatingInputService : Service() {
         root.clipChildren = false
         root.clipToPadding = false
 
+        val shadow = View(this)
+        shadow.background = buttonShape(
+            fill = Color.rgb(17, 17, 17),
+            stroke = Color.rgb(17, 17, 17),
+        )
+        val buttonSize = dp(33)
+        val shadowParams = FrameLayout.LayoutParams(buttonSize, buttonSize).apply {
+            leftMargin = dp(4)
+            topMargin = dp(4)
+        }
+        root.addView(shadow, shadowParams)
+
         val button = TextView(this)
-        button.text = "FV"
+        button.text = ""
         button.gravity = Gravity.CENTER
         button.typeface = Typeface.DEFAULT_BOLD
-        button.textSize = 13f
-        button.setTextColor(Color.rgb(4, 16, 8))
-        button.background = bubbleDrawable(connected)
-        button.elevation = 10f
+        button.textSize = 1f
+        button.setTextColor(Color.rgb(5, 5, 5))
+        button.background = buttonDrawable(connected)
 
-        val buttonSize = dp(58)
         root.addView(
             button,
-            FrameLayout.LayoutParams(buttonSize, buttonSize, Gravity.CENTER),
+            FrameLayout.LayoutParams(buttonSize, buttonSize).apply {
+                leftMargin = 0
+                topMargin = 0
+            },
         )
 
         val input = EditText(this)
@@ -120,8 +133,8 @@ class FloatingInputService : Service() {
         root.addView(input, FrameLayout.LayoutParams(dp(2), dp(2), Gravity.CENTER))
 
         params = WindowManager.LayoutParams(
-            dp(68),
-            dp(68),
+            dp(39),
+            dp(39),
             overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT,
@@ -190,8 +203,8 @@ class FloatingInputService : Service() {
 
     private fun updateIndicator(connected: Boolean) {
         val root = overlayView ?: return
-        val button = root.getChildAt(0) as? TextView ?: return
-        button.background = bubbleDrawable(connected)
+        val button = root.getChildAt(1) as? TextView ?: return
+        button.background = buttonDrawable(connected)
     }
 
     private fun removeOverlay() {
@@ -218,11 +231,19 @@ class FloatingInputService : Service() {
         }
     }
 
-    private fun bubbleDrawable(connected: Boolean): GradientDrawable {
+    private fun buttonDrawable(connected: Boolean): GradientDrawable {
+        return buttonShape(
+            fill = if (connected) Color.rgb(244, 255, 248) else Color.WHITE,
+            stroke = Color.rgb(17, 17, 17),
+        )
+    }
+
+    private fun buttonShape(fill: Int, stroke: Int): GradientDrawable {
         return GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(if (connected) Color.rgb(40, 245, 141) else Color.rgb(142, 169, 154))
-            setStroke(dp(2), Color.argb(170, 255, 255, 255))
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(9).toFloat()
+            setColor(fill)
+            setStroke(dp(2), stroke)
         }
     }
 
