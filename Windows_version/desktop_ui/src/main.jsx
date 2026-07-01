@@ -84,7 +84,7 @@ function FlowBridgeDarkGreenPreview() {
               FB
             </div>
             <div>
-              <div className="font-mono text-[11px] uppercase tracking-[0.35em] text-[#74E7A5]/70">Flow Bridge</div>
+              <div className="font-mono text-[11px] uppercase tracking-[0.35em] text-[#74E7A5]/70">FLOW VOICE</div>
               <h1 className="mt-1 text-2xl font-semibold tracking-tight text-[#F0FFF5]">Desktop Connection Console</h1>
             </div>
           </div>
@@ -220,7 +220,7 @@ function CustomTitleBar({ onMinimize, onMaximize, onClose }) {
         <div className="grid h-7 w-7 place-items-center rounded-lg border border-[#28F58D]/25 bg-[#0B1D14] font-mono text-[10px] font-black text-[#80FFBA] shadow-[0_0_18px_rgba(40,245,141,0.12)]">
           FB
         </div>
-        <div className="font-mono text-[11px] uppercase tracking-[0.28em] text-[#8BFFBA]/75">Flow Bridge</div>
+        <div className="font-mono text-[11px] uppercase tracking-[0.28em] text-[#8BFFBA]/75">FLOW VOICE</div>
       </div>
       <div className="pywebview-drag-region h-full min-w-0 flex-1" />
       <div className="flex h-full items-center border-l border-[#173524]">

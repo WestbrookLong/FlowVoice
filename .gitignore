@@ -5,6 +5,7 @@ __pycache__/
 .packages
 build/
 *.exe
+*.apk
 *.zip
 *.pkg
 AGENTS.md
