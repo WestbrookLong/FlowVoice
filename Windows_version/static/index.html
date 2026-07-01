@@ -154,6 +154,22 @@
         box-shadow: 0 0 8px rgba(196, 83, 60, 0.6);
       }
 
+      .settings-button {
+        min-height: 42px;
+        width: 42px;
+        flex: 0 0 auto;
+        border-radius: 999px;
+        padding: 0;
+        color: var(--ink);
+      }
+
+      .settings-button[data-active="true"] {
+        border-color: rgba(40, 245, 141, 0.5);
+        color: #041008;
+        background: var(--accent);
+        box-shadow: 0 0 24px rgba(40, 245, 141, 0.24);
+      }
+
       .composer {
         position: relative;
         display: grid;
@@ -215,6 +231,130 @@
         box-shadow: 0 0 28px rgba(40, 245, 141, 0.24);
       }
 
+      .settings-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: none;
+        align-items: flex-end;
+        justify-content: center;
+        padding: 16px;
+        background: rgba(0, 0, 0, 0.46);
+        backdrop-filter: blur(8px);
+      }
+
+      .settings-overlay[data-open="true"] {
+        display: flex;
+      }
+
+      .settings-sheet {
+        width: min(100%, 520px);
+        border: 1px solid rgba(40, 245, 141, 0.22);
+        border-radius: 26px;
+        padding: 18px;
+        background:
+          linear-gradient(145deg, rgba(8, 16, 13, 0.98), rgba(11, 29, 20, 0.96)),
+          var(--panel);
+        box-shadow: 0 30px 90px rgba(0, 0, 0, 0.55);
+      }
+
+      .settings-sheet h2 {
+        margin: 0 0 12px;
+        color: #F0FFF5;
+        font: 800 22px/1.1 "Segoe UI", sans-serif;
+      }
+
+      .setting-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        border: 1px solid rgba(40, 245, 141, 0.12);
+        border-radius: 20px;
+        padding: 14px;
+        background: rgba(6, 16, 11, 0.78);
+      }
+
+      .setting-group {
+        display: grid;
+        gap: 12px;
+      }
+
+      .dependent-settings {
+        display: none;
+        border-left: 2px solid rgba(40, 245, 141, 0.28);
+        margin-left: 12px;
+        padding-left: 12px;
+      }
+
+      .dependent-settings[data-visible="true"] {
+        display: block;
+      }
+
+      .setting-title {
+        color: var(--ink);
+        font: 800 16px/1.2 "Segoe UI", "PingFang SC", sans-serif;
+      }
+
+      .setting-desc {
+        margin-top: 6px;
+        color: var(--muted);
+        font: 500 12px/1.45 "Segoe UI", "PingFang SC", sans-serif;
+      }
+
+      .switch {
+        position: relative;
+        width: 54px;
+        height: 32px;
+        flex: 0 0 auto;
+      }
+
+      .switch input {
+        position: absolute;
+        opacity: 0;
+      }
+
+      .slider {
+        position: absolute;
+        inset: 0;
+        border: 1px solid rgba(40, 245, 141, 0.18);
+        border-radius: 999px;
+        background: rgba(91, 112, 98, 0.22);
+        transition: 0.16s ease;
+      }
+
+      .slider::before {
+        content: "";
+        position: absolute;
+        top: 4px;
+        left: 4px;
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        background: #8EA99A;
+        transition: 0.16s ease;
+      }
+
+      .switch input:checked + .slider {
+        background: rgba(40, 245, 141, 0.26);
+        border-color: rgba(40, 245, 141, 0.55);
+      }
+
+      .switch input:checked + .slider::before {
+        transform: translateX(22px);
+        background: var(--accent);
+        box-shadow: 0 0 18px rgba(40, 245, 141, 0.42);
+      }
+
+      .switch input:disabled + .slider {
+        opacity: 0.5;
+      }
+
+      .close-settings {
+        width: 100%;
+        margin-top: 12px;
+      }
+
       @media (max-width: 430px) {
         .shell {
           border-radius: 28px;
@@ -250,6 +390,7 @@
           <div id="status" class="status" data-state="idle">
           <span class="dot"></span>
         </div>
+          <button id="settings" class="settings-button" type="button" aria-label="设置">⚙</button>
         </header>
 
         <div class="composer">
@@ -262,10 +403,58 @@
       </section>
     </main>
 
+    <div id="settingsOverlay" class="settings-overlay" data-open="false">
+      <section class="settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <h2 id="settingsTitle">设置</h2>
+        <div class="setting-group">
+          <div class="setting-row">
+            <div>
+              <div class="setting-title">标点过滤</div>
+              <div class="setting-desc">开启后，电脑端只接收过滤真实标点后的文本；手机输入框内容保持原样。</div>
+            </div>
+            <label class="switch">
+              <input id="punctuationToggle" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div id="spokenPunctuationSettings" class="dependent-settings" data-visible="false">
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">口述标点转换</div>
+                <div class="setting-desc">把“逗号、句号、问号”等文字命令转换为真实标点，并按中英文上下文选择标点样式。</div>
+              </div>
+              <label class="switch">
+                <input id="spokenPunctuationToggle" type="checkbox" />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div>
+              <div class="setting-title">英文语音命令</div>
+              <div class="setting-desc">开启后，说 enter 会回车；说 back 会退格一次；说 backspace / back space 会删除到上一个标点；说 delete all 会尽量删除当前光标前内容。命令大小写不敏感。</div>
+            </div>
+            <label class="switch">
+              <input id="voiceCommandToggle" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+        <button id="closeSettings" class="close-settings primary" type="button">完成</button>
+      </section>
+    </div>
+
     <script>
       const statusEl = document.querySelector("#status");
       const inputEl = document.querySelector("#input");
       const clearButton = document.querySelector("#clear");
+      const settingsButton = document.querySelector("#settings");
+      const settingsOverlay = document.querySelector("#settingsOverlay");
+      const closeSettingsButton = document.querySelector("#closeSettings");
+      const punctuationToggle = document.querySelector("#punctuationToggle");
+      const spokenPunctuationSettings = document.querySelector("#spokenPunctuationSettings");
+      const spokenPunctuationToggle = document.querySelector("#spokenPunctuationToggle");
+      const voiceCommandToggle = document.querySelector("#voiceCommandToggle");
       const params = new URLSearchParams(location.search);
       const token = params.get("token") || "";
 
@@ -273,8 +462,11 @@
       let seq = 0;
       let queue = [];
       let reconnectTimer = null;
-      let lastSentText = "";
+      let lastSnapshotKey = "";
       let lastExplicitBackspaceAt = 0;
+      let filterPunctuation = localStorage.getItem("flowVoice.filterPunctuation") === "1";
+      let convertSpokenPunctuation = localStorage.getItem("flowVoice.convertSpokenPunctuation") === "1";
+      let enableVoiceCommands = localStorage.getItem("flowVoice.enableVoiceCommands") === "1";
 
       function setStatus(text, state = "idle") {
         statusEl.dataset.state = state;
@@ -283,6 +475,28 @@
         } else {
           statusEl.innerHTML = text;
         }
+      }
+
+      function applySettingsState() {
+        if (!filterPunctuation) {
+          convertSpokenPunctuation = false;
+        }
+        punctuationToggle.checked = filterPunctuation;
+        spokenPunctuationToggle.checked = convertSpokenPunctuation;
+        voiceCommandToggle.checked = enableVoiceCommands;
+        spokenPunctuationToggle.disabled = !filterPunctuation;
+        spokenPunctuationSettings.dataset.visible = String(filterPunctuation);
+        settingsButton.dataset.active = String(
+          filterPunctuation || convertSpokenPunctuation || enableVoiceCommands,
+        );
+      }
+
+      function currentSettings() {
+        return {
+          filterPunctuation,
+          convertSpokenPunctuation,
+          enableVoiceCommands,
+        };
       }
 
       function socketUrl() {
@@ -307,20 +521,27 @@
         }
       }
 
-      function syncNow() {
-        if (inputEl.value === lastSentText) {
-          return;
-        }
-        lastSentText = inputEl.value;
-        sendMessage({
-          type: "sync_text",
+      function syncSnapshot(force = false) {
+        const message = {
+          type: "sync_state",
           token,
           seq: ++seq,
           text: inputEl.value,
+          settings: currentSettings(),
+        };
+        const snapshotKey = JSON.stringify({
+          text: message.text,
+          settings: message.settings,
         });
+        if (!force && snapshotKey === lastSnapshotKey) {
+          return;
+        }
+        lastSnapshotKey = snapshotKey;
+        sendMessage(message);
       }
 
       function resetSession() {
+        lastSnapshotKey = "";
         sendMessage({
           type: "reset_session",
           token,
@@ -328,63 +549,28 @@
         });
       }
 
-      function sendEnter() {
+      function sendBackspace(count) {
+        const normalizedCount = Math.max(0, Math.floor(count || 0));
+        if (!normalizedCount) {
+          return;
+        }
+        const ops = [];
+        let remaining = normalizedCount;
+        while (remaining > 0) {
+          const chunk = Math.min(remaining, 1000);
+          ops.push({ type: "backspace", count: chunk });
+          remaining -= chunk;
+        }
         sendMessage({
           type: "ops",
           token,
           seq: ++seq,
-          ops: [{ type: "enter" }],
+          ops,
         });
-      }
-
-      function clearInputAfterEnter() {
-        inputEl.value = "";
-        lastSentText = "";
-        resetSession();
-      }
-
-      function triggerEnterAndClear() {
-        sendEnter();
-        clearInputAfterEnter();
-        requestAnimationFrame(() => inputEl.focus());
-      }
-
-      function maybeSendEnterAndClear(event) {
-        const isKeyboardEnter = event.key === "Enter";
-        const isInputLineBreak = event.inputType === "insertLineBreak" || event.inputType === "insertParagraph";
-        if (!isKeyboardEnter && !isInputLineBreak) {
-          return;
-        }
-        event.preventDefault();
-        triggerEnterAndClear();
-      }
-
-      function syncOrHandleLineBreak() {
-        const lineBreakIndex = inputEl.value.search(/\r?\n/);
-        if (lineBreakIndex >= 0) {
-          const textBeforeBreak = inputEl.value.slice(0, lineBreakIndex);
-          if (textBeforeBreak !== lastSentText) {
-            lastSentText = textBeforeBreak;
-            sendMessage({
-              type: "sync_text",
-              token,
-              seq: ++seq,
-              text: textBeforeBreak,
-            });
-          }
-          triggerEnterAndClear();
-          return;
-        }
-        syncNow();
       }
 
       function sendExplicitBackspace() {
-        sendMessage({
-          type: "ops",
-          token,
-          seq: ++seq,
-          ops: [{ type: "backspace", count: 1 }],
-        });
+        sendBackspace(1);
       }
 
       function maybeSendEmptyBackspace(event) {
@@ -418,6 +604,7 @@
         ws.addEventListener("open", () => {
           setStatus("在线", "connected");
           flushQueue();
+          syncSnapshot(true);
           inputEl.focus();
         });
 
@@ -443,19 +630,60 @@
       }
 
       inputEl.addEventListener("keydown", maybeSendEmptyBackspace);
-      inputEl.addEventListener("keydown", maybeSendEnterAndClear);
       inputEl.addEventListener("beforeinput", maybeSendEmptyBackspace);
-      inputEl.addEventListener("beforeinput", maybeSendEnterAndClear);
-      inputEl.addEventListener("input", syncOrHandleLineBreak);
+      inputEl.addEventListener("input", () => syncSnapshot());
 
       clearButton.addEventListener("click", () => {
         inputEl.value = "";
-        lastSentText = "";
         resetSession();
         inputEl.focus();
       });
 
-      
+      settingsButton.addEventListener("click", () => {
+        settingsOverlay.dataset.open = "true";
+      });
+
+      closeSettingsButton.addEventListener("click", () => {
+        settingsOverlay.dataset.open = "false";
+        inputEl.focus();
+      });
+
+      settingsOverlay.addEventListener("click", (event) => {
+        if (event.target === settingsOverlay) {
+          settingsOverlay.dataset.open = "false";
+          inputEl.focus();
+        }
+      });
+
+      punctuationToggle.addEventListener("change", () => {
+        filterPunctuation = punctuationToggle.checked;
+        if (!filterPunctuation) {
+          convertSpokenPunctuation = false;
+          localStorage.setItem("flowVoice.convertSpokenPunctuation", "0");
+        }
+        localStorage.setItem("flowVoice.filterPunctuation", filterPunctuation ? "1" : "0");
+        applySettingsState();
+        syncSnapshot(true);
+      });
+
+      spokenPunctuationToggle.addEventListener("change", () => {
+        if (!filterPunctuation) {
+          return;
+        }
+        convertSpokenPunctuation = spokenPunctuationToggle.checked;
+        localStorage.setItem("flowVoice.convertSpokenPunctuation", convertSpokenPunctuation ? "1" : "0");
+        applySettingsState();
+        syncSnapshot(true);
+      });
+
+      voiceCommandToggle.addEventListener("change", () => {
+        enableVoiceCommands = voiceCommandToggle.checked;
+        localStorage.setItem("flowVoice.enableVoiceCommands", enableVoiceCommands ? "1" : "0");
+        applySettingsState();
+        syncSnapshot(true);
+      });
+
+      applySettingsState();
       connect();
     </script>
   </body>

@@ -18,7 +18,15 @@ body {
     sans-serif;
 }
 
+html.agent-float-page,
+html.agent-float-page body,
+html.agent-float-page #root {
+  background: transparent !important;
+}
+
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }

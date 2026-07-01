@@ -3,12 +3,14 @@ import ctypes
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import sys
+import unicodedata
 from ctypes import wintypes
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from aiohttp import web
 
@@ -40,15 +42,29 @@ if sys.stdout is not None:
 def log(message: str) -> None:
     LOGGER.info(message)
 
+
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
-INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
-INPUT_HARDWARE = 2
 VK_BACK = 0x08
 VK_RETURN = 0x0D
 ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 USER32 = ctypes.WinDLL("user32", use_last_error=True)
+
+MAX_SYNC_TEXT_LEN = 5000
+MAX_RAW_TEXT_LEN = 50000
+MAX_DELETE_ALL_BACKSPACES = 5000
+BOUNDARY_PUNCTUATION = ",.;:!?，。！？、；："
+BOUNDARY_PUNCTUATION_SET = set(BOUNDARY_PUNCTUATION)
+LINE_BREAK_PATTERN = re.compile(r"\r?\n")
+VOICE_COMMAND_PATTERN = re.compile(
+    r"((?:delete\s+all)|(?:back\s*space)|back|enter)\s*$",
+    re.IGNORECASE,
+)
+BOUNDARY_PUNCTUATION_PATTERN = re.compile(r"[,.!?;:，。！？、；：]")
+SPOKEN_PUNCTUATION_PATTERN = re.compile(
+    "左双引号|右双引号|左单引号|右单引号|左括号|右括号|省略号|破折号|感叹号|叹号|逗号|句号|顿号|问号|冒号|分号|引号",
+)
 
 
 class MOUSEINPUT(ctypes.Structure):
@@ -81,8 +97,6 @@ class HARDWAREINPUT(ctypes.Structure):
 
 
 class INPUT_UNION(ctypes.Union):
-    # Keep the full Win32 INPUT union layout. SendInput validates cbSize against
-    # the platform ABI even when this program only sends keyboard events.
     _fields_ = [
         ("mi", MOUSEINPUT),
         ("ki", KEYBDINPUT),
@@ -122,7 +136,6 @@ def press_key(vk: int) -> None:
 
 
 def type_text(text: str) -> None:
-    # SendInput with KEYEVENTF_UNICODE accepts UTF-16 code units, preserving Chinese and emoji.
     data = text.encode("utf-16-le")
     for i in range(0, len(data), 2):
         code_unit = data[i] | (data[i + 1] << 8)
@@ -141,8 +154,9 @@ def backspace(count: int) -> None:
 
 
 class TextSession:
-    def __init__(self) -> None:
+    def __init__(self, on_text_inserted: Callable[[str], None] | None = None) -> None:
         self.text = ""
+        self.on_text_inserted = on_text_inserted
 
     def replace(self, new_text: str) -> None:
         prefix_len = common_prefix_len(self.text, new_text)
@@ -152,10 +166,139 @@ class TextSession:
             backspace(delete_count)
         if insert_text:
             type_text(insert_text)
+            if self.on_text_inserted is not None:
+                self.on_text_inserted(insert_text)
         self.text = new_text
 
     def reset(self) -> None:
         self.text = ""
+
+
+class BridgeSettings:
+    def __init__(
+        self,
+        filter_punctuation: bool = False,
+        convert_spoken_punctuation: bool = False,
+        enable_voice_commands: bool = False,
+    ) -> None:
+        self.filter_punctuation = filter_punctuation
+        self.convert_spoken_punctuation = filter_punctuation and convert_spoken_punctuation
+        self.enable_voice_commands = enable_voice_commands
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> "BridgeSettings":
+        if payload is None:
+            return cls()
+        if not isinstance(payload, dict):
+            raise ValueError("settings must be an object")
+        filter_punctuation = payload.get("filterPunctuation", False)
+        convert_spoken_punctuation = payload.get("convertSpokenPunctuation", False)
+        enable_voice_commands = payload.get("enableVoiceCommands", False)
+        for key, value in (
+            ("filterPunctuation", filter_punctuation),
+            ("convertSpokenPunctuation", convert_spoken_punctuation),
+            ("enableVoiceCommands", enable_voice_commands),
+        ):
+            if not isinstance(value, bool):
+                raise ValueError(f"settings.{key} must be a boolean")
+        return cls(filter_punctuation, convert_spoken_punctuation, enable_voice_commands)
+
+
+class FlowInputSession:
+    def __init__(self, on_text_inserted: Callable[[str], None] | None = None) -> None:
+        self.on_text_inserted = on_text_inserted
+        self.text_session = TextSession(on_text_inserted)
+        self.raw_text = ""
+        self.raw_session_start = 0
+        self.last_seq = 0
+
+    def should_process(self, seq: Any) -> bool:
+        if not isinstance(seq, int):
+            return True
+        if seq <= self.last_seq:
+            log(f"[ws] skip stale seq={seq}, last_seq={self.last_seq}")
+            return False
+        self.last_seq = seq
+        return True
+
+    def sync_processed_text(self, text: str) -> None:
+        normalized = text[:MAX_SYNC_TEXT_LEN]
+        preview = normalized[-120:]
+        log(
+            f"[sync] replace {len(self.text_session.text)} chars -> {len(normalized)} chars; tail={preview!r}",
+        )
+        self.text_session.replace(normalized)
+
+    def reset(self) -> None:
+        log("[sync] reset session")
+        self.raw_text = ""
+        self.raw_session_start = 0
+        self.text_session.reset()
+
+    def sync_state(self, raw_text: str, settings: BridgeSettings) -> None:
+        self.raw_text = trim_raw_text(raw_text, self)
+        if self.raw_session_start > len(self.raw_text):
+            self.raw_session_start = 0
+
+        iterations = 0
+        while iterations < 64:
+            iterations += 1
+            active_text = self.raw_text[self.raw_session_start :]
+            if not active_text:
+                self.sync_processed_text("")
+                return
+
+            line_break_match = LINE_BREAK_PATTERN.search(active_text)
+            if line_break_match is not None:
+                prefix_raw = active_text[: line_break_match.start()]
+                self.sync_processed_text(render_text(prefix_raw, settings))
+                log("[inject] enter (line break)")
+                press_key(VK_RETURN)
+                self.raw_session_start += line_break_match.end()
+                self.text_session.reset()
+                continue
+
+            punctuation_command = parse_spoken_punctuation_command(active_text) if settings.convert_spoken_punctuation else None
+            if punctuation_command is not None:
+                prefix_raw, punctuation_text, consumed_length = punctuation_command
+                self.sync_processed_text(render_text(prefix_raw, settings))
+                log(f"[inject] punctuation {punctuation_text!r} (spoken punctuation)")
+                type_text(punctuation_text)
+                if self.on_text_inserted is not None:
+                    self.on_text_inserted(punctuation_text)
+                self.raw_session_start += consumed_length
+                self.text_session.reset()
+                continue
+
+            command = parse_voice_command(active_text) if settings.enable_voice_commands else None
+            if command is not None:
+                command_name, prefix_raw, consumed_length = command
+                previous_synced_text = self.text_session.text
+                prefix_text = render_text(prefix_raw, settings)
+                self.sync_processed_text(prefix_text)
+                if command_name == "enter":
+                    log("[inject] enter (voice command)")
+                    press_key(VK_RETURN)
+                elif command_name == "back":
+                    log("[inject] backspace 1 (voice command)")
+                    send_backspace_chunks(1)
+                elif command_name == "backspace":
+                    target_text = prefix_text or previous_synced_text
+                    count = backspace_count_to_previous_punctuation(target_text)
+                    log(f"[inject] backspace {count} (voice command)")
+                    send_backspace_chunks(count)
+                elif command_name == "delete all":
+                    count = max(MAX_DELETE_ALL_BACKSPACES, len(previous_synced_text), len(prefix_text))
+                    log(f"[inject] backspace {count} (delete all)")
+                    send_backspace_chunks(count)
+                self.raw_session_start += consumed_length
+                self.text_session.reset()
+                continue
+
+            self.sync_processed_text(render_text(active_text, settings))
+            return
+
+        raise ValueError("too many pending control events in raw text")
 
 
 def get_lan_ip() -> str:
@@ -175,6 +318,152 @@ def common_prefix_len(left: str, right: str) -> int:
     return index
 
 
+def trim_raw_text(raw_text: str, session: FlowInputSession) -> str:
+    if len(raw_text) <= MAX_RAW_TEXT_LEN:
+        return raw_text
+    overflow = len(raw_text) - MAX_RAW_TEXT_LEN
+    session.raw_session_start = max(0, session.raw_session_start - overflow)
+    return raw_text[overflow:]
+
+
+def send_backspace_chunks(count: int) -> None:
+    remaining = max(0, count)
+    while remaining > 0:
+        chunk = min(remaining, 1000)
+        backspace(chunk)
+        remaining -= chunk
+
+
+def is_cjk(char: str) -> bool:
+    if not char:
+        return False
+    code = ord(char)
+    return (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+    )
+
+
+def parse_voice_command(raw_text: str) -> tuple[str, str, int] | None:
+    match = VOICE_COMMAND_PATTERN.search(raw_text)
+    if match is None:
+        return None
+    command_start = match.start(1)
+    prefix_end = command_start
+    if command_start > 0:
+        boundary_char = raw_text[command_start - 1]
+        if boundary_char.isspace() or boundary_char in BOUNDARY_PUNCTUATION_SET:
+            prefix_end -= 1
+        elif not is_cjk(boundary_char):
+            return None
+    raw_command = re.sub(r"\s+", " ", match.group(1).lower()).strip()
+    normalized_command = "backspace" if raw_command == "back space" else raw_command
+    prefix_raw = raw_text[:prefix_end].rstrip()
+    return normalized_command, prefix_raw, match.end()
+
+
+def strip_punctuation(text: str) -> str:
+    return "".join(
+        char
+        for char in text
+        if unicodedata.category(char)[:1] not in {"P", "S"}
+    )
+
+
+def nearby_non_space(text: str, index: int, direction: int) -> str:
+    while 0 <= index < len(text):
+        if not text[index].isspace():
+            return text[index]
+        index += direction
+    return ""
+
+
+def is_latin_or_digit(char: str) -> bool:
+    return bool(char) and bool(re.match(r"[A-Za-z0-9]", char))
+
+
+def punctuation_style(text: str, start: int, end: int) -> str:
+    prev_char = nearby_non_space(text, start - 1, -1)
+    next_char = nearby_non_space(text, end, 1)
+    if is_cjk(prev_char) or is_cjk(next_char):
+        return "zh"
+    if is_latin_or_digit(prev_char) or is_latin_or_digit(next_char):
+        return "en"
+    return "zh"
+
+
+def spoken_punctuation_symbol(phrase: str, text: str, start: int, end: int) -> str:
+    is_english = punctuation_style(text, start, end) == "en"
+    mapping = {
+        "逗号": "," if is_english else "，",
+        "句号": "." if is_english else "。",
+        "顿号": "、",
+        "问号": "?" if is_english else "？",
+        "感叹号": "!" if is_english else "！",
+        "叹号": "!" if is_english else "！",
+        "冒号": ":" if is_english else "：",
+        "分号": ";" if is_english else "；",
+        "省略号": "..." if is_english else "……",
+        "破折号": "--" if is_english else "——",
+        "左括号": "(" if is_english else "（",
+        "右括号": ")" if is_english else "）",
+        "左双引号": '"' if is_english else "“",
+        "右双引号": '"' if is_english else "”",
+        "左单引号": "'" if is_english else "‘",
+        "右单引号": "'" if is_english else "’",
+        "引号": '"' if is_english else "”",
+    }
+    return mapping.get(phrase, phrase)
+
+
+def parse_spoken_punctuation_command(raw_text: str) -> tuple[str, str, int] | None:
+    match = SPOKEN_PUNCTUATION_PATTERN.search(raw_text)
+    if match is None:
+        return None
+    prefix_raw = raw_text[: match.start()].rstrip()
+    punctuation_text = spoken_punctuation_symbol(match.group(0), raw_text, match.start(), match.end())
+    return prefix_raw, punctuation_text, match.end()
+
+
+def cleanup_converted_punctuation(text: str) -> str:
+    text = re.sub(r"\s+([，。！？、；：）】》」』”’])", r"\1", text)
+    text = re.sub(r"([（【《「『“‘])\s+", r"\1", text)
+    text = re.sub(r"\s+([（【《「『“‘])", r"\1", text)
+    text = re.sub(r"([，。！？、；：])\s+", r"\1", text)
+    text = re.sub(r"\s+([,.!?;:])", r"\1", text)
+    return re.sub(r"([,.!?;:])(?=[A-Za-z0-9])", r"\1 ", text)
+
+
+def convert_spoken_punctuation(text: str) -> str:
+    def replace_phrase(match: re.Match[str]) -> str:
+        return spoken_punctuation_symbol(match.group(0), text, match.start(), match.end())
+
+    return cleanup_converted_punctuation(SPOKEN_PUNCTUATION_PATTERN.sub(replace_phrase, text))
+
+
+def render_text(raw_text: str, settings: BridgeSettings) -> str:
+    text = raw_text
+    if settings.filter_punctuation:
+        text = strip_punctuation(text)
+        if settings.convert_spoken_punctuation:
+            text = convert_spoken_punctuation(text)
+    return text[:MAX_SYNC_TEXT_LEN]
+
+
+def backspace_count_to_previous_punctuation(text: str) -> int:
+    chars = list(text)
+    search_end = len(chars)
+    while search_end > 0 and chars[search_end - 1].isspace():
+        search_end -= 1
+    while search_end > 0 and BOUNDARY_PUNCTUATION_PATTERN.match(chars[search_end - 1]):
+        search_end -= 1
+    for index in range(search_end - 1, -1, -1):
+        if BOUNDARY_PUNCTUATION_PATTERN.match(chars[index]):
+            return len(chars) - index - 1
+    return max(len(chars), 1000)
+
+
 def validate_ops(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if payload.get("type") != "ops":
         raise ValueError("unsupported message type")
@@ -191,7 +480,7 @@ def validate_ops(payload: dict[str, Any]) -> list[dict[str, Any]]:
             if not isinstance(text, str):
                 raise ValueError("insert.text must be a string")
             if text:
-                normalized.append({"type": "insert", "text": text[:5000]})
+                normalized.append({"type": "insert", "text": text[:MAX_SYNC_TEXT_LEN]})
         elif op_type == "enter":
             normalized.append({"type": "enter"})
         elif op_type == "backspace":
@@ -199,15 +488,29 @@ def validate_ops(payload: dict[str, Any]) -> list[dict[str, Any]]:
             if not isinstance(count, int):
                 raise ValueError("backspace.count must be an integer")
             if count > 0:
-                normalized.append({"type": "backspace", "count": min(count, 1000)})
+                normalized.append({"type": "backspace", "count": min(count, MAX_DELETE_ALL_BACKSPACES)})
         else:
             raise ValueError(f"unsupported op type: {op_type}")
     return normalized
 
 
-def create_app(token: str) -> web.Application:
+def create_app(
+    token: str,
+    text_agent: Any = None,
+    typing_stats: Any = None,
+    input_gate: Any = None,
+) -> web.Application:
     app = web.Application()
-    session = TextSession()
+    session = FlowInputSession(
+        (lambda text: typing_stats.record(text, "mobile")) if typing_stats is not None else None
+    )
+    text_agent_route_active = False
+
+    def require_token(request: web.Request, payload: dict[str, Any] | None = None) -> None:
+        request_token = request.query.get("token")
+        payload_token = payload.get("token") if isinstance(payload, dict) else None
+        if request_token != token and payload_token != token:
+            raise web.HTTPUnauthorized(text="invalid token")
 
     def html_response(path: Path) -> web.FileResponse:
         return web.FileResponse(
@@ -225,7 +528,24 @@ def create_app(token: str) -> web.Application:
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
 
+    async def text_agent_state(request: web.Request) -> web.Response:
+        require_token(request)
+        if text_agent is None:
+            raise web.HTTPServiceUnavailable(text="text agent is not configured")
+        return web.json_response(text_agent.get_state())
+
+    async def text_agent_mode(request: web.Request) -> web.Response:
+        payload = await request.json()
+        require_token(request, payload)
+        if text_agent is None:
+            raise web.HTTPServiceUnavailable(text="text agent is not configured")
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="payload must be an object")
+        text_agent.set_mode(bool(payload.get("enabled", False)))
+        return web.json_response(text_agent.get_state())
+
     async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
+        nonlocal text_agent_route_active
         if request.query.get("token") != token:
             raise web.HTTPUnauthorized(text="invalid token")
 
@@ -234,6 +554,7 @@ def create_app(token: str) -> web.Application:
         peer = request.remote or "unknown"
         log(f"[ws] connected: {peer}")
         await ws.send_json({"type": "ready"})
+        input_gate_blocked = False
 
         async for msg in ws:
             if msg.type != web.WSMsgType.TEXT:
@@ -242,30 +563,86 @@ def create_app(token: str) -> web.Application:
                 payload = json.loads(msg.data)
                 if payload.get("token") != token:
                     raise ValueError("invalid token")
-                if payload.get("type") == "sync_text":
+                if not session.should_process(payload.get("seq")):
+                    await ws.send_json({"type": "ack", "seq": payload.get("seq")})
+                    continue
+
+                message_type = payload.get("type")
+                if input_gate is not None and input_gate.is_paused():
+                    if not input_gate_blocked:
+                        if text_agent_route_active:
+                            text_agent_route_active = False
+                        session.reset()
+                    input_gate_blocked = True
+                    await ws.send_json({"type": "ack", "seq": payload.get("seq")})
+                    continue
+
+                resumed_from_input_gate = input_gate_blocked
+                if resumed_from_input_gate:
+                    input_gate_blocked = False
+
+                if message_type == "sync_state":
+                    text = payload.get("text")
+                    if not isinstance(text, str):
+                        raise ValueError("sync_state.text must be a string")
+                    settings = BridgeSettings.from_payload(payload.get("settings"))
+                    if resumed_from_input_gate:
+                        if text_agent is not None:
+                            text_agent.reset_capture_baseline(text)
+                        session.reset()
+                        session.raw_text = trim_raw_text(text, session)
+                        session.raw_session_start = len(session.raw_text)
+                    elif text_agent is not None and text_agent.should_capture_text():
+                        text_agent_route_active = True
+                        active_source_text = text_agent.capture_active_source(text)
+                        text_agent.update_text(
+                            text,
+                            render_text(active_source_text, settings),
+                            active_source_text=active_source_text,
+                        )
+                    else:
+                        if text_agent_route_active:
+                            baseline_text = text_agent.get_last_mobile_text() if text_agent is not None else text
+                            session.reset()
+                            session.raw_text = trim_raw_text(baseline_text, session)
+                            session.raw_session_start = len(session.raw_text)
+                            text_agent_route_active = False
+                        if text_agent is not None:
+                            text_agent.observe_mobile_text(text)
+                        session.sync_state(text, settings)
+                elif message_type == "sync_text":
                     text = payload.get("text")
                     if not isinstance(text, str):
                         raise ValueError("sync_text.text must be a string")
-                    text = text[:5000]
-                    log(
-                        f"[sync] replace {len(session.text)} chars -> {len(text)} chars: {text!r}",
-                    )
-                    session.replace(text)
-                elif payload.get("type") == "reset_session":
-                    log("[sync] reset session")
-                    session.reset()
+                    if resumed_from_input_gate:
+                        session.text_session.text = text[:MAX_SYNC_TEXT_LEN]
+                    else:
+                        session.sync_processed_text(text)
+                elif message_type == "reset_session":
+                    if text_agent is not None and text_agent.should_capture_text():
+                        text_agent.update_text("", "", active_source_text="")
+                    else:
+                        session.reset()
                 else:
                     ops = validate_ops(payload)
                     for op in ops:
                         if op["type"] == "insert":
+                            if input_gate is not None and input_gate.is_paused():
+                                continue
                             log(f"[inject] insert {len(op['text'])} chars: {op['text']!r}")
                             type_text(op["text"])
+                            if typing_stats is not None:
+                                typing_stats.record(op["text"], "mobile")
                         elif op["type"] == "enter":
+                            if input_gate is not None and input_gate.is_paused():
+                                continue
                             log("[inject] enter")
                             press_key(VK_RETURN)
                         elif op["type"] == "backspace":
+                            if input_gate is not None and input_gate.is_paused():
+                                continue
                             log(f"[inject] backspace {op['count']}")
-                            backspace(op["count"])
+                            send_backspace_chunks(op["count"])
                 await ws.send_json({"type": "ack", "seq": payload.get("seq")})
             except Exception as exc:
                 log(f"[error] {exc}")
@@ -276,6 +653,8 @@ def create_app(token: str) -> web.Application:
 
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
+    app.router.add_get("/api/text-agent/state", text_agent_state)
+    app.router.add_post("/api/text-agent/mode", text_agent_mode)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_static("/static", STATIC_DIR)
     return app
@@ -286,7 +665,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="0.0.0.0", help="Bind host, default: 0.0.0.0")
     parser.add_argument("--port", type=int, default=8787, help="Bind port, default: 8787")
     parser.add_argument("--token", default=None, help="Session token. Defaults to a random token.")
-    parser.add_argument("--test-text", default=None, help="Type text into the current Windows focus after a countdown, then exit.")
+    parser.add_argument(
+        "--test-text",
+        default=None,
+        help="Type text into the current Windows focus after a countdown, then exit.",
+    )
     return parser.parse_args()
 
 
