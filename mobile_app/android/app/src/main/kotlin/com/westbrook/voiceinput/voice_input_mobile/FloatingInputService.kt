@@ -32,6 +32,7 @@ class FloatingInputService : Service() {
     private var params: WindowManager.LayoutParams? = null
     private var suppressTextCallback = false
     private var builtInVoiceMode = false
+    private var voiceOverlayStatus = "loading"
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -101,48 +102,37 @@ class FloatingInputService : Service() {
         root.clipToPadding = false
 
         val dock = FrameLayout(this)
-        dock.background = buttonShape(
+        dock.tag = VOICE_DOCK_TAG
+        dock.background = roundedShape(
             fill = Color.rgb(17, 17, 17),
-            stroke = Color.rgb(17, 17, 17),
+            stroke = Color.rgb(5, 5, 5),
+            radiusDp = 16,
+            strokeDp = 2,
         )
         root.addView(
             dock,
-            FrameLayout.LayoutParams(dp(82), dp(42)).apply {
-                leftMargin = dp(3)
-                topMargin = dp(3)
+            FrameLayout.LayoutParams(dp(54), dp(54)).apply {
+                leftMargin = dp(2)
+                topMargin = dp(2)
             },
         )
 
         val micButton = TextView(this)
-        micButton.text = "●"
+        micButton.tag = VOICE_BUTTON_TAG
+        micButton.text = "\u25CF"
         micButton.gravity = Gravity.CENTER
         micButton.typeface = Typeface.DEFAULT_BOLD
-        micButton.textSize = 21f
-        micButton.setTextColor(Color.WHITE)
-        micButton.background = buttonDrawable(connected)
+        micButton.textSize = 25f
+        micButton.setTextColor(Color.rgb(5, 5, 5))
+        micButton.background = voiceButtonDrawable(listening = true)
         dock.addView(
             micButton,
-            FrameLayout.LayoutParams(dp(34), dp(34), Gravity.CENTER).apply {
-                leftMargin = dp(4)
-            },
-        )
-
-        val status = TextView(this)
-        status.text = "REC"
-        status.gravity = Gravity.CENTER
-        status.typeface = Typeface.DEFAULT_BOLD
-        status.textSize = 12f
-        status.setTextColor(Color.rgb(244, 255, 248))
-        dock.addView(
-            status,
-            FrameLayout.LayoutParams(dp(38), dp(34), Gravity.CENTER or Gravity.END).apply {
-                rightMargin = dp(4)
-            },
+            FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER),
         )
 
         params = WindowManager.LayoutParams(
-            dp(88),
-            dp(48),
+            dp(58),
+            dp(58),
             overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -157,6 +147,7 @@ class FloatingInputService : Service() {
         installVoiceDragAndToggle(root)
         manager.addView(root, params)
         overlayView = root
+        updateVoiceOverlayStatus("loading")
     }
 
     private fun createOverlay(connected: Boolean) {
@@ -316,7 +307,7 @@ class FloatingInputService : Service() {
                     if (!dragging) {
                         if (BuiltInVoiceEngine.isRecording()) {
                             BuiltInVoiceEngine.stop()
-                            MainActivity.sendBuiltInVoiceStatus("stopped")
+                            handleBuiltInVoiceStatus("stopped")
                         } else {
                             startBuiltInVoice()
                         }
@@ -329,11 +320,17 @@ class FloatingInputService : Service() {
     }
 
     private fun startBuiltInVoice() {
+        updateVoiceOverlayStatus("loading")
         BuiltInVoiceEngine.start(
             context = applicationContext,
             onText = { text, isFinal -> MainActivity.sendBuiltInVoiceText(text, isFinal) },
-            onStatus = { status -> MainActivity.sendBuiltInVoiceStatus(status) },
+            onStatus = { status -> handleBuiltInVoiceStatus(status) },
         )
+    }
+
+    private fun handleBuiltInVoiceStatus(status: String) {
+        updateVoiceOverlayStatus(status)
+        MainActivity.sendBuiltInVoiceStatus(status)
     }
 
     private fun focusInput(input: EditText) {
@@ -368,9 +365,24 @@ class FloatingInputService : Service() {
     }
 
     private fun updateIndicator(connected: Boolean) {
+        if (builtInVoiceMode) {
+            return
+        }
         val root = overlayView ?: return
         val button = root.getChildAt(1) as? TextView ?: return
         button.background = buttonDrawable(connected)
+    }
+
+    private fun updateVoiceOverlayStatus(status: String) {
+        voiceOverlayStatus = status
+        val root = overlayView ?: return
+        if (!builtInVoiceMode) {
+            return
+        }
+        val button = root.findViewWithTag<TextView>(VOICE_BUTTON_TAG) ?: return
+        val listening = status == "loading" || status == "listening"
+        button.text = if (status.startsWith("error:")) "!" else "\u25CF"
+        button.background = voiceButtonDrawable(listening)
     }
 
     private fun removeOverlay() {
@@ -412,12 +424,25 @@ class FloatingInputService : Service() {
         )
     }
 
+    private fun voiceButtonDrawable(listening: Boolean): GradientDrawable {
+        return roundedShape(
+            fill = if (listening) Color.rgb(40, 245, 141) else Color.rgb(244, 255, 248),
+            stroke = Color.rgb(5, 5, 5),
+            radiusDp = 13,
+            strokeDp = 2,
+        )
+    }
+
     private fun buttonShape(fill: Int, stroke: Int): GradientDrawable {
+        return roundedShape(fill = fill, stroke = stroke, radiusDp = 9, strokeDp = 2)
+    }
+
+    private fun roundedShape(fill: Int, stroke: Int, radiusDp: Int, strokeDp: Int): GradientDrawable {
         return GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = dp(9).toFloat()
+            cornerRadius = dp(radiusDp).toFloat()
             setColor(fill)
-            setStroke(dp(2), stroke)
+            setStroke(dp(strokeDp), stroke)
         }
     }
 
@@ -456,6 +481,8 @@ class FloatingInputService : Service() {
         const val EXTRA_TEXT = "text"
         const val EXTRA_CONNECTED = "connected"
         const val EXTRA_BUILT_IN_VOICE = "builtInVoice"
+        private const val VOICE_DOCK_TAG = "voice_dock"
+        private const val VOICE_BUTTON_TAG = "voice_button"
         private const val NOTIFICATION_ID = 4108
     }
 }
