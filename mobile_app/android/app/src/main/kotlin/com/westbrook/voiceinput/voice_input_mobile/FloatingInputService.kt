@@ -1,5 +1,8 @@
 package com.westbrook.voiceinput.voice_input_mobile
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -28,6 +31,7 @@ class FloatingInputService : Service() {
     private var hiddenInput: EditText? = null
     private var params: WindowManager.LayoutParams? = null
     private var suppressTextCallback = false
+    private var builtInVoiceMode = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -35,12 +39,14 @@ class FloatingInputService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 removeOverlay()
+                BuiltInVoiceEngine.stop()
                 stopSelf()
             }
             ACTION_START, null -> {
                 val text = intent?.getStringExtra(EXTRA_TEXT).orEmpty()
                 val connected = intent?.getBooleanExtra(EXTRA_CONNECTED, false) ?: false
-                showOverlay(text, connected)
+                val builtInVoice = intent?.getBooleanExtra(EXTRA_BUILT_IN_VOICE, false) ?: false
+                showOverlay(text, connected, builtInVoice)
             }
         }
         return START_NOT_STICKY
@@ -48,6 +54,7 @@ class FloatingInputService : Service() {
 
     override fun onDestroy() {
         removeOverlay()
+        BuiltInVoiceEngine.stop()
         super.onDestroy()
     }
 
@@ -55,15 +62,26 @@ class FloatingInputService : Service() {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
     }
 
-    private fun showOverlay(text: String, connected: Boolean) {
+    private fun showOverlay(text: String, connected: Boolean, builtInVoice: Boolean) {
         if (!canDrawOverlays()) {
             stopSelf()
             return
         }
-        if (overlayView == null) {
-            createOverlay(connected)
+        if (overlayView == null || builtInVoiceMode != builtInVoice) {
+            removeOverlay()
+            builtInVoiceMode = builtInVoice
+            if (builtInVoice) {
+                createVoiceOverlay(connected)
+                startForeground(NOTIFICATION_ID, createNotification())
+                startBuiltInVoice()
+            } else {
+                createOverlay(connected)
+            }
         } else {
             updateIndicator(connected)
+        }
+        if (builtInVoice) {
+            return
         }
         val input = hiddenInput ?: return
         if (input.text.toString() != text) {
@@ -72,6 +90,73 @@ class FloatingInputService : Service() {
             input.setSelection(input.text.length)
             suppressTextCallback = false
         }
+    }
+
+    private fun createVoiceOverlay(connected: Boolean) {
+        val manager = getSystemService(WINDOW_SERVICE) as WindowManager
+        windowManager = manager
+
+        val root = FrameLayout(this)
+        root.clipChildren = false
+        root.clipToPadding = false
+
+        val dock = FrameLayout(this)
+        dock.background = buttonShape(
+            fill = Color.rgb(17, 17, 17),
+            stroke = Color.rgb(17, 17, 17),
+        )
+        root.addView(
+            dock,
+            FrameLayout.LayoutParams(dp(82), dp(42)).apply {
+                leftMargin = dp(3)
+                topMargin = dp(3)
+            },
+        )
+
+        val micButton = TextView(this)
+        micButton.text = "●"
+        micButton.gravity = Gravity.CENTER
+        micButton.typeface = Typeface.DEFAULT_BOLD
+        micButton.textSize = 21f
+        micButton.setTextColor(Color.WHITE)
+        micButton.background = buttonDrawable(connected)
+        dock.addView(
+            micButton,
+            FrameLayout.LayoutParams(dp(34), dp(34), Gravity.CENTER).apply {
+                leftMargin = dp(4)
+            },
+        )
+
+        val status = TextView(this)
+        status.text = "REC"
+        status.gravity = Gravity.CENTER
+        status.typeface = Typeface.DEFAULT_BOLD
+        status.textSize = 12f
+        status.setTextColor(Color.rgb(244, 255, 248))
+        dock.addView(
+            status,
+            FrameLayout.LayoutParams(dp(38), dp(34), Gravity.CENTER or Gravity.END).apply {
+                rightMargin = dp(4)
+            },
+        )
+
+        params = WindowManager.LayoutParams(
+            dp(88),
+            dp(48),
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = dp(18)
+            y = dp(160)
+        }
+
+        installVoiceDragAndToggle(root)
+        manager.addView(root, params)
+        overlayView = root
     }
 
     private fun createOverlay(connected: Boolean) {
@@ -197,6 +282,60 @@ class FloatingInputService : Service() {
         }
     }
 
+    private fun installVoiceDragAndToggle(root: View) {
+        var startX = 0
+        var startY = 0
+        var downRawX = 0f
+        var downRawY = 0f
+        var dragging = false
+
+        root.setOnTouchListener { _, event ->
+            val layoutParams = params ?: return@setOnTouchListener false
+            val manager = windowManager ?: return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startX = layoutParams.x
+                    startY = layoutParams.y
+                    downRawX = event.rawX
+                    downRawY = event.rawY
+                    dragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downRawX
+                    val dy = event.rawY - downRawY
+                    if (abs(dx) > dp(4) || abs(dy) > dp(4)) {
+                        dragging = true
+                        layoutParams.x = startX + dx.toInt()
+                        layoutParams.y = startY + dy.toInt()
+                        manager.updateViewLayout(root, layoutParams)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!dragging) {
+                        if (BuiltInVoiceEngine.isRecording()) {
+                            BuiltInVoiceEngine.stop()
+                            MainActivity.sendBuiltInVoiceStatus("stopped")
+                        } else {
+                            startBuiltInVoice()
+                        }
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun startBuiltInVoice() {
+        BuiltInVoiceEngine.start(
+            context = applicationContext,
+            onText = { text, isFinal -> MainActivity.sendBuiltInVoiceText(text, isFinal) },
+            onStatus = { status -> MainActivity.sendBuiltInVoiceStatus(status) },
+        )
+    }
+
     private fun focusInput(input: EditText) {
         setOverlayFocusable(true)
         input.isFocusable = true
@@ -247,6 +386,14 @@ class FloatingInputService : Service() {
         hiddenInput = null
         overlayView = null
         params = null
+        if (builtInVoiceMode) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        }
     }
 
     private fun overlayType(): Int {
@@ -274,6 +421,31 @@ class FloatingInputService : Service() {
         }
     }
 
+    private fun createNotification(): Notification {
+        val channelId = "flowvoice_builtin_voice"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "Flow Voice recording",
+                NotificationManager.IMPORTANCE_LOW,
+            )
+            getSystemService(NotificationManager::class.java)
+                ?.createNotificationChannel(channel)
+        }
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, channelId)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        return builder
+            .setSmallIcon(applicationInfo.icon)
+            .setContentTitle("Flow Voice")
+            .setContentText("Built-in voice input is listening")
+            .setOngoing(true)
+            .build()
+    }
+
     private fun dp(value: Int): Int {
         return (value * resources.displayMetrics.density).toInt()
     }
@@ -283,5 +455,7 @@ class FloatingInputService : Service() {
         const val ACTION_STOP = "com.westbrook.voiceinput.voice_input_mobile.STOP_FLOATING_INPUT"
         const val EXTRA_TEXT = "text"
         const val EXTRA_CONNECTED = "connected"
+        const val EXTRA_BUILT_IN_VOICE = "builtInVoice"
+        private const val NOTIFICATION_ID = 4108
     }
 }

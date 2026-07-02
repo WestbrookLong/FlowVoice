@@ -1,6 +1,8 @@
 package com.westbrook.voiceinput.voice_input_mobile
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -24,9 +26,27 @@ class MainActivity : FlutterActivity() {
                     requestOverlayPermission()
                     result.success(null)
                 }
+                "hasRecordAudioPermission" -> result.success(hasRecordAudioPermission())
+                "requestRecordAudioPermission" -> {
+                    requestRecordAudioPermission()
+                    result.success(null)
+                }
+                "startBuiltInVoice" -> {
+                    BuiltInVoiceEngine.start(
+                        context = applicationContext,
+                        onText = { text, isFinal -> sendBuiltInVoiceText(text, isFinal) },
+                        onStatus = { status -> sendBuiltInVoiceStatus(status) },
+                    )
+                    result.success(true)
+                }
+                "stopBuiltInVoice" -> {
+                    BuiltInVoiceEngine.stop()
+                    result.success(null)
+                }
                 "startOverlay" -> {
                     val text = call.argument<String>("text").orEmpty()
                     val connected = call.argument<Boolean>("connected") ?: false
+                    val builtInVoice = call.argument<Boolean>("builtInVoice") ?: false
                     if (!canDrawOverlays()) {
                         result.success(false)
                         return@setMethodCallHandler
@@ -35,6 +55,7 @@ class MainActivity : FlutterActivity() {
                         .setAction(FloatingInputService.ACTION_START)
                         .putExtra(FloatingInputService.EXTRA_TEXT, text)
                         .putExtra(FloatingInputService.EXTRA_CONNECTED, connected)
+                        .putExtra(FloatingInputService.EXTRA_BUILT_IN_VOICE, builtInVoice)
                     startService(intent)
                     result.success(true)
                 }
@@ -73,6 +94,20 @@ class MainActivity : FlutterActivity() {
         startActivity(intent)
     }
 
+    private fun hasRecordAudioPermission(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestRecordAudioPermission() {
+        if (hasRecordAudioPermission()) {
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 2401)
+        }
+    }
+
     private fun stopFloatingOverlay() {
         val intent = Intent(this, FloatingInputService::class.java)
             .setAction(FloatingInputService.ACTION_STOP)
@@ -85,6 +120,17 @@ class MainActivity : FlutterActivity() {
 
         fun sendOverlayText(text: String) {
             overlayChannel?.invokeMethod("overlayTextChanged", text)
+        }
+
+        fun sendBuiltInVoiceText(text: String, isFinal: Boolean) {
+            overlayChannel?.invokeMethod(
+                "builtInVoiceText",
+                mapOf("text" to text, "final" to isFinal),
+            )
+        }
+
+        fun sendBuiltInVoiceStatus(status: String) {
+            overlayChannel?.invokeMethod("builtInVoiceStatus", status)
         }
     }
 }
