@@ -5,6 +5,12 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+const String _prefFilterPunctuation = 'filterPunctuation';
+const String _prefConvertSpokenPunctuation = 'convertSpokenPunctuation';
+const String _prefEnableVoiceCommands = 'enableVoiceCommands';
+const String _prefPureBlackMode = 'pureBlackMode';
 
 void main() {
   runApp(const FlowVoiceApp());
@@ -68,6 +74,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   bool _filterPunctuation = true;
   bool _convertSpokenPunctuation = true;
   bool _enableVoiceCommands = true;
+  bool _pureBlackMode = false;
   bool _settingsOpen = false;
   bool _scannerOpen = false;
   bool _recentlyTyping = false;
@@ -82,7 +89,9 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     WidgetsBinding.instance.addObserver(this);
     _overlayChannel.setMethodCallHandler(_handleOverlayCall);
     _inputController.addListener(_handleInputChanged);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _focusInputSoon(force: true));
+    _loadPrefs();
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _focusInputSoon(force: true));
   }
 
   @override
@@ -140,8 +149,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
         await _overlayChannel.invokeMethod<void>('requestOverlayPermission');
         return false;
       }
-      final started =
-          await _overlayChannel.invokeMethod<bool>('startOverlay', <String, Object?>{
+      final started = await _overlayChannel
+          .invokeMethod<bool>('startOverlay', <String, Object?>{
         'text': _inputController.text,
         'connected': _status == BridgeStatus.connected,
       });
@@ -172,6 +181,35 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     } catch (_) {
       // Best effort cleanup only.
     }
+  }
+
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _filterPunctuation = prefs.getBool(_prefFilterPunctuation) ?? true;
+      _convertSpokenPunctuation =
+          prefs.getBool(_prefConvertSpokenPunctuation) ?? true;
+      _enableVoiceCommands = prefs.getBool(_prefEnableVoiceCommands) ?? true;
+      _pureBlackMode = prefs.getBool(_prefPureBlackMode) ?? false;
+      if (!_filterPunctuation) {
+        _convertSpokenPunctuation = false;
+      }
+    });
+    _syncInput(force: true);
+    _focusInputSoon(force: true);
+  }
+
+  Future<void> _savePrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await Future.wait(<Future<bool>>[
+      prefs.setBool(_prefFilterPunctuation, _filterPunctuation),
+      prefs.setBool(_prefConvertSpokenPunctuation, _convertSpokenPunctuation),
+      prefs.setBool(_prefEnableVoiceCommands, _enableVoiceCommands),
+      prefs.setBool(_prefPureBlackMode, _pureBlackMode),
+    ]);
   }
 
   void _focusInputSoon({
@@ -436,16 +474,21 @@ class _FlowVoicePageState extends State<FlowVoicePage>
             void update(VoidCallback fn) {
               setState(fn);
               setSheetState(() {});
+              _savePrefs();
               _syncInput(force: true);
+              if (_pureBlackMode) {
+                _focusInputSoon(force: true);
+              }
             }
 
             return SafeArea(
               child: Padding(
                 padding: const EdgeInsets.all(16),
-                child: _SettingsSheet(
+                child: _SettingsSheetV2(
                   filterPunctuation: _filterPunctuation,
                   convertSpokenPunctuation: _convertSpokenPunctuation,
                   enableVoiceCommands: _enableVoiceCommands,
+                  pureBlackMode: _pureBlackMode,
                   onFilterChanged: (value) => update(() {
                     _filterPunctuation = value;
                     if (!value) {
@@ -458,6 +501,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                       : null,
                   onCommandChanged: (value) =>
                       update(() => _enableVoiceCommands = value),
+                  onPureBlackChanged: (value) =>
+                      update(() => _pureBlackMode = value),
                   onClose: () => Navigator.of(context).pop(),
                 ),
               ),
@@ -467,12 +512,42 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       },
     ).whenComplete(() {
       _settingsOpen = false;
-      _focusInputSoon();
+      _focusInputSoon(force: _pureBlackMode);
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_pureBlackMode) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (_) => _focusInputSoon(force: true),
+            child: Stack(
+              children: <Widget>[
+                const Positioned.fill(child: ColoredBox(color: Colors.black)),
+                Positioned(
+                  top: 18,
+                  right: 18,
+                  child: _BlackModeSettingsButton(onPressed: _openSettings),
+                ),
+                Positioned(
+                  left: 1,
+                  bottom: 1,
+                  child: _HiddenVoiceInput(
+                    controller: _inputController,
+                    focusNode: _inputFocusNode,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       body: SafeArea(
         child: GestureDetector(
@@ -695,7 +770,9 @@ class _StatusPill extends StatelessWidget {
     final color = switch (status) {
       BridgeStatus.connected => const Color(0xFF28D85F),
       BridgeStatus.connecting => const Color(0xFFB8B8B8),
-      BridgeStatus.disconnected || BridgeStatus.error => const Color(0xFFE1513F),
+      BridgeStatus.disconnected ||
+      BridgeStatus.error =>
+        const Color(0xFFE1513F),
     };
     return Semantics(
       label: '连接状态：$text',
@@ -744,6 +821,41 @@ class _RoundIconButton extends StatelessWidget {
   }
 }
 
+class _BlackModeSettingsButton extends StatelessWidget {
+  const _BlackModeSettingsButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: '打开设置',
+      button: true,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: const Color(0xFF050505),
+              border: Border.all(color: const Color(0xFF1C1C1C), width: 1.5),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(
+              Icons.settings,
+              color: Color(0xFF2B2B2B),
+              size: 21,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _PixelButtonFrame extends StatelessWidget {
   const _PixelButtonFrame({
     required this.child,
@@ -760,7 +872,7 @@ class _PixelButtonFrame extends StatelessWidget {
     return Material(
       color: Colors.transparent,
       child: InkWell(
-          onTap: onTap,
+        onTap: onTap,
         borderRadius: BorderRadius.circular(15),
         child: Container(
           width: 54,
@@ -943,23 +1055,133 @@ class _VoiceButton extends StatelessWidget {
   }
 }
 
-class _SettingsSheet extends StatelessWidget {
-  const _SettingsSheet({
+class _SettingsSheetV2 extends StatelessWidget {
+  const _SettingsSheetV2({
     required this.filterPunctuation,
     required this.convertSpokenPunctuation,
     required this.enableVoiceCommands,
+    required this.pureBlackMode,
     required this.onFilterChanged,
     required this.onConvertChanged,
     required this.onCommandChanged,
+    required this.onPureBlackChanged,
     required this.onClose,
   });
 
   final bool filterPunctuation;
   final bool convertSpokenPunctuation;
   final bool enableVoiceCommands;
+  final bool pureBlackMode;
   final ValueChanged<bool> onFilterChanged;
   final ValueChanged<bool>? onConvertChanged;
   final ValueChanged<bool> onCommandChanged;
+  final ValueChanged<bool> onPureBlackChanged;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.82,
+      ),
+      child: Container(
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(26),
+          border: Border.all(color: const Color(0x3828F58D)),
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: <Color>[
+              Color(0xFF08100D),
+              Color(0xFF0B1D14),
+            ],
+          ),
+          boxShadow: const <BoxShadow>[
+            BoxShadow(
+              color: Color(0x8C000000),
+              blurRadius: 90,
+              offset: Offset(0, 30),
+            ),
+          ],
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              const Text(
+                '设置',
+                style: TextStyle(
+                  color: Color(0xFFF0FFF5),
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 12),
+              _SettingSwitch(
+                title: '标点过滤',
+                description: '开启后，电脑端只接收过滤真实标点后的文本；手机输入框内容保持原样。',
+                value: filterPunctuation,
+                onChanged: onFilterChanged,
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.only(left: 12),
+                child: _SettingSwitch(
+                  title: '口述标点转换',
+                  description: '把“逗号、句号、问号”等文字命令转换为真实标点，并按上下文选择样式。',
+                  value: convertSpokenPunctuation,
+                  onChanged: onConvertChanged,
+                ),
+              ),
+              const SizedBox(height: 12),
+              _SettingSwitch(
+                title: '英文语音命令',
+                description:
+                    '支持 enter、back、backspace / back space、delete all。命令大小写不敏感。',
+                value: enableVoiceCommands,
+                onChanged: onCommandChanged,
+              ),
+              const SizedBox(height: 12),
+              _SettingSwitch(
+                title: '纯黑屏模式',
+                description: '开启后主界面变为纯黑屏，点击屏幕会持续唤起输入法；通过右上角设置关闭后恢复当前界面。',
+                value: pureBlackMode,
+                onChanged: onPureBlackChanged,
+              ),
+              const SizedBox(height: 12),
+              _VoiceButton(label: '完成', onPressed: onClose),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ignore: unused_element
+class _SettingsSheet extends StatelessWidget {
+  const _SettingsSheet({
+    required this.filterPunctuation,
+    required this.convertSpokenPunctuation,
+    required this.enableVoiceCommands,
+    required this.pureBlackMode,
+    required this.onFilterChanged,
+    required this.onConvertChanged,
+    required this.onCommandChanged,
+    required this.onPureBlackChanged,
+    required this.onClose,
+  });
+
+  final bool filterPunctuation;
+  final bool convertSpokenPunctuation;
+  final bool enableVoiceCommands;
+  final bool pureBlackMode;
+  final ValueChanged<bool> onFilterChanged;
+  final ValueChanged<bool>? onConvertChanged;
+  final ValueChanged<bool> onCommandChanged;
+  final ValueChanged<bool> onPureBlackChanged;
   final VoidCallback onClose;
 
   @override
