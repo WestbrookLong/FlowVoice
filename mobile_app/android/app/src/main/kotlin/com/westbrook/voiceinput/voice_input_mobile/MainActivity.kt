@@ -65,6 +65,10 @@ class MainActivity : FlutterActivity() {
                     val connected = call.argument<Boolean>("connected") ?: false
                     val builtInVoice = call.argument<Boolean>("builtInVoice") ?: false
                     val autoVoiceClick = call.argument<Boolean>("autoVoiceClick") ?: false
+                    val autoVoiceClickDelayMs =
+                        call.argument<Int>("autoVoiceClickDelayMs") ?: 500
+                    val autoVoiceClickDurationMs =
+                        call.argument<Int>("autoVoiceClickDurationMs") ?: 500
                     if (!canDrawOverlays()) {
                         result.success(false)
                         return@setMethodCallHandler
@@ -75,6 +79,14 @@ class MainActivity : FlutterActivity() {
                         .putExtra(FloatingInputService.EXTRA_CONNECTED, connected)
                         .putExtra(FloatingInputService.EXTRA_BUILT_IN_VOICE, builtInVoice)
                         .putExtra(FloatingInputService.EXTRA_AUTO_VOICE_CLICK, autoVoiceClick)
+                        .putExtra(
+                            FloatingInputService.EXTRA_AUTO_VOICE_CLICK_DELAY_MS,
+                            autoVoiceClickDelayMs,
+                        )
+                        .putExtra(
+                            FloatingInputService.EXTRA_AUTO_VOICE_CLICK_DURATION_MS,
+                            autoVoiceClickDurationMs,
+                        )
                     startService(intent)
                     result.success(true)
                 }

@@ -46,7 +46,7 @@ class VoiceKeyClickAccessibilityService : AccessibilityService() {
             return false
         }
 
-        fun click(x: Float, y: Float): Boolean {
+        fun click(x: Float, y: Float, durationMs: Long): Boolean {
             val service = instance ?: return false
             val radius = CALIBRATION_DOT_SIZE_DP * service.resources.displayMetrics.density / 2f
             val nudge = radius * 0.18f
@@ -56,12 +56,17 @@ class VoiceKeyClickAccessibilityService : AccessibilityService() {
                 lineTo(x, y)
             }
             val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, TAP_DURATION_MS))
+                .addStroke(
+                    GestureDescription.StrokeDescription(
+                        path,
+                        0,
+                        durationMs.coerceIn(100L, 1000L),
+                    ),
+                )
                 .build()
             return service.dispatchGesture(gesture, null, null)
         }
 
-        private const val TAP_DURATION_MS = 500L
         private const val CALIBRATION_DOT_SIZE_DP = 34
     }
 }

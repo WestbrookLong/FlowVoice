@@ -34,6 +34,8 @@ class FloatingInputService : Service() {
     private var builtInVoiceMode = false
     private var voiceOverlayStatus = "loading"
     private var autoVoiceClickEnabled = false
+    private var autoVoiceClickDelayMs = 500
+    private var autoVoiceClickDurationMs = 500
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -50,6 +52,10 @@ class FloatingInputService : Service() {
                 val builtInVoice = intent?.getBooleanExtra(EXTRA_BUILT_IN_VOICE, false) ?: false
                 autoVoiceClickEnabled =
                     intent?.getBooleanExtra(EXTRA_AUTO_VOICE_CLICK, false) ?: false
+                autoVoiceClickDelayMs =
+                    intent?.getIntExtra(EXTRA_AUTO_VOICE_CLICK_DELAY_MS, 500) ?: 500
+                autoVoiceClickDurationMs =
+                    intent?.getIntExtra(EXTRA_AUTO_VOICE_CLICK_DURATION_MS, 500) ?: 500
                 showOverlay(text, connected, builtInVoice)
             }
         }
@@ -370,11 +376,15 @@ class FloatingInputService : Service() {
                 MainActivity.sendOverlayDiagnostic("voice_click_point_invalid")
                 return@postDelayed
             }
-            val clicked = VoiceKeyClickAccessibilityService.click(x, y)
+            val clicked = VoiceKeyClickAccessibilityService.click(
+                x,
+                y,
+                autoVoiceClickDurationMs.coerceIn(100, 1000).toLong(),
+            )
             if (!clicked) {
                 MainActivity.sendOverlayDiagnostic("voice_click_dispatch_failed")
             }
-        }, AUTO_VOICE_CLICK_DELAY_MS)
+        }, autoVoiceClickDelayMs.coerceIn(200, 1200).toLong())
     }
 
     private fun releaseInputFocus(input: EditText) {
@@ -515,7 +525,8 @@ class FloatingInputService : Service() {
         const val EXTRA_CONNECTED = "connected"
         const val EXTRA_BUILT_IN_VOICE = "builtInVoice"
         const val EXTRA_AUTO_VOICE_CLICK = "autoVoiceClick"
-        private const val AUTO_VOICE_CLICK_DELAY_MS = 500L
+        const val EXTRA_AUTO_VOICE_CLICK_DELAY_MS = "autoVoiceClickDelayMs"
+        const val EXTRA_AUTO_VOICE_CLICK_DURATION_MS = "autoVoiceClickDurationMs"
         private const val VOICE_DOCK_TAG = "voice_dock"
         private const val VOICE_BUTTON_TAG = "voice_button"
         private const val NOTIFICATION_ID = 4108

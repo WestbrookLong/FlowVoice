@@ -14,6 +14,8 @@ const String _prefPureBlackMode = 'pureBlackMode';
 const String _prefPunctuationInsert = 'punctuationInsert';
 const String _prefBuiltInVoiceInput = 'builtInVoiceInput';
 const String _prefAutoVoiceKeyClick = 'autoVoiceKeyClick';
+const String _prefAutoVoiceKeyClickDelayMs = 'autoVoiceKeyClickDelayMs';
+const String _prefAutoVoiceKeyClickDurationMs = 'autoVoiceKeyClickDurationMs';
 const String _prefPunctuationKeyX = 'punctuationKeyX';
 const String _prefPunctuationKeyY = 'punctuationKeyY';
 
@@ -83,6 +85,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   bool _punctuationInsert = false;
   bool _builtInVoiceInput = false;
   bool _autoVoiceKeyClick = false;
+  double _autoVoiceKeyClickDelayMs = 500;
+  double _autoVoiceKeyClickDurationMs = 500;
   bool _builtInVoiceListening = false;
   String _builtInVoiceStatus = 'ready';
   String _builtInVoiceBaseText = '';
@@ -220,6 +224,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
         'connected': _status == BridgeStatus.connected,
         'builtInVoice': _builtInVoiceInput,
         'autoVoiceClick': _autoVoiceKeyClick && !_builtInVoiceInput,
+        'autoVoiceClickDelayMs': _autoVoiceKeyClickDelayMs.round(),
+        'autoVoiceClickDurationMs': _autoVoiceKeyClickDurationMs.round(),
       });
       return started ?? false;
     } catch (_) {
@@ -383,6 +389,10 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       _punctuationInsert = prefs.getBool(_prefPunctuationInsert) ?? false;
       _builtInVoiceInput = prefs.getBool(_prefBuiltInVoiceInput) ?? false;
       _autoVoiceKeyClick = prefs.getBool(_prefAutoVoiceKeyClick) ?? false;
+      _autoVoiceKeyClickDelayMs =
+          (prefs.getInt(_prefAutoVoiceKeyClickDelayMs) ?? 500).toDouble();
+      _autoVoiceKeyClickDurationMs =
+          (prefs.getInt(_prefAutoVoiceKeyClickDurationMs) ?? 500).toDouble();
       final punctuationX = prefs.getDouble(_prefPunctuationKeyX);
       final punctuationY = prefs.getDouble(_prefPunctuationKeyY);
       if (punctuationX != null && punctuationY != null) {
@@ -406,6 +416,14 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       prefs.setBool(_prefPunctuationInsert, _punctuationInsert),
       prefs.setBool(_prefBuiltInVoiceInput, _builtInVoiceInput),
       prefs.setBool(_prefAutoVoiceKeyClick, _autoVoiceKeyClick),
+      prefs.setInt(
+        _prefAutoVoiceKeyClickDelayMs,
+        _autoVoiceKeyClickDelayMs.round(),
+      ),
+      prefs.setInt(
+        _prefAutoVoiceKeyClickDurationMs,
+        _autoVoiceKeyClickDurationMs.round(),
+      ),
     ]);
   }
 
@@ -810,6 +828,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                   punctuationInsert: _punctuationInsert,
                   builtInVoiceInput: _builtInVoiceInput,
                   autoVoiceKeyClick: _autoVoiceKeyClick,
+                  autoVoiceKeyClickDelayMs: _autoVoiceKeyClickDelayMs,
+                  autoVoiceKeyClickDurationMs: _autoVoiceKeyClickDurationMs,
                   onFilterChanged: (value) => update(() {
                     _filterPunctuation = value;
                     if (!value) {
@@ -837,6 +857,10 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                   }),
                   onAutoVoiceKeyClickChanged: (value) =>
                       update(() => _autoVoiceKeyClick = value),
+                  onAutoVoiceKeyClickDelayChanged: (value) =>
+                      update(() => _autoVoiceKeyClickDelayMs = value),
+                  onAutoVoiceKeyClickDurationChanged: (value) =>
+                      update(() => _autoVoiceKeyClickDurationMs = value),
                   onOpenAccessibilitySettings: _openAccessibilitySettings,
                   onCalibrateVoiceKeyClick: _startVoiceClickCalibration,
                   onClose: () => Navigator.of(context).pop(),
@@ -1771,6 +1795,78 @@ class _VoiceButton extends StatelessWidget {
   }
 }
 
+class _TimingSlider extends StatelessWidget {
+  const _TimingSlider({
+    required this.title,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.divisions,
+    required this.onChanged,
+  });
+
+  final String title;
+  final double value;
+  final double min;
+  final double max;
+  final int divisions;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final displayValue = value.round();
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+      decoration: BoxDecoration(
+        color: const Color(0x6608100D),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0x2428F58D)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: <Widget>[
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Color(0xFFDDE7DF),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              Text(
+                '${displayValue}ms',
+                style: const TextStyle(
+                  color: Color(0xFF28F58D),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              activeTrackColor: const Color(0xFF28F58D),
+              inactiveTrackColor: const Color(0x3328F58D),
+              thumbColor: const Color(0xFFF4FFF8),
+              overlayColor: const Color(0x3328F58D),
+            ),
+            child: Slider(
+              value: value.clamp(min, max),
+              min: min,
+              max: max,
+              divisions: divisions,
+              onChanged: onChanged,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SettingsSheetV2 extends StatelessWidget {
   const _SettingsSheetV2({
     required this.filterPunctuation,
@@ -1780,6 +1876,8 @@ class _SettingsSheetV2 extends StatelessWidget {
     required this.punctuationInsert,
     required this.builtInVoiceInput,
     required this.autoVoiceKeyClick,
+    required this.autoVoiceKeyClickDelayMs,
+    required this.autoVoiceKeyClickDurationMs,
     required this.onFilterChanged,
     required this.onConvertChanged,
     required this.onCommandChanged,
@@ -1787,6 +1885,8 @@ class _SettingsSheetV2 extends StatelessWidget {
     required this.onPunctuationInsertChanged,
     required this.onBuiltInVoiceInputChanged,
     required this.onAutoVoiceKeyClickChanged,
+    required this.onAutoVoiceKeyClickDelayChanged,
+    required this.onAutoVoiceKeyClickDurationChanged,
     required this.onOpenAccessibilitySettings,
     required this.onCalibrateVoiceKeyClick,
     required this.onClose,
@@ -1799,6 +1899,8 @@ class _SettingsSheetV2 extends StatelessWidget {
   final bool punctuationInsert;
   final bool builtInVoiceInput;
   final bool autoVoiceKeyClick;
+  final double autoVoiceKeyClickDelayMs;
+  final double autoVoiceKeyClickDurationMs;
   final ValueChanged<bool> onFilterChanged;
   final ValueChanged<bool>? onConvertChanged;
   final ValueChanged<bool> onCommandChanged;
@@ -1806,6 +1908,8 @@ class _SettingsSheetV2 extends StatelessWidget {
   final ValueChanged<bool> onPunctuationInsertChanged;
   final ValueChanged<bool> onBuiltInVoiceInputChanged;
   final ValueChanged<bool> onAutoVoiceKeyClickChanged;
+  final ValueChanged<double> onAutoVoiceKeyClickDelayChanged;
+  final ValueChanged<double> onAutoVoiceKeyClickDurationChanged;
   final VoidCallback onOpenAccessibilitySettings;
   final VoidCallback onCalibrateVoiceKeyClick;
   final VoidCallback onClose;
@@ -1899,9 +2003,27 @@ class _SettingsSheetV2 extends StatelessWidget {
               const SizedBox(height: 12),
               _SettingSwitch(
                 title: '自动点击键盘语音键',
-                description: '普通悬浮窗唤起键盘后，500ms 后点击你校准的位置，用来打开系统输入法语音输入。',
+                description: '普通悬浮窗唤起键盘后，按下方参数点击你校准的位置，用来打开系统输入法语音输入。',
                 value: autoVoiceKeyClick,
                 onChanged: onAutoVoiceKeyClickChanged,
+              ),
+              const SizedBox(height: 10),
+              _TimingSlider(
+                title: '点击延迟',
+                value: autoVoiceKeyClickDelayMs,
+                min: 200,
+                max: 1200,
+                divisions: 100,
+                onChanged: onAutoVoiceKeyClickDelayChanged,
+              ),
+              const SizedBox(height: 10),
+              _TimingSlider(
+                title: '按压时长',
+                value: autoVoiceKeyClickDurationMs,
+                min: 100,
+                max: 1000,
+                divisions: 90,
+                onChanged: onAutoVoiceKeyClickDurationChanged,
               ),
               const SizedBox(height: 10),
               _VoiceButton(
