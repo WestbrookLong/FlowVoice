@@ -12,6 +12,8 @@ const String _prefConvertSpokenPunctuation = 'convertSpokenPunctuation';
 const String _prefEnableVoiceCommands = 'enableVoiceCommands';
 const String _prefPureBlackMode = 'pureBlackMode';
 const String _prefPunctuationInsert = 'punctuationInsert';
+const String _prefPunctuationKeyX = 'punctuationKeyX';
+const String _prefPunctuationKeyY = 'punctuationKeyY';
 
 void main() {
   runApp(const FlowVoiceApp());
@@ -81,6 +83,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   bool _scannerOpen = false;
   bool _recentlyTyping = false;
   bool _overlayUpdatingInput = false;
+  Offset? _punctuationKeyOffset;
   Timer? _reconnectTimer;
   Timer? _typingIdleTimer;
   final List<Map<String, Object?>> _queue = <Map<String, Object?>>[];
@@ -197,6 +200,11 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       _enableVoiceCommands = prefs.getBool(_prefEnableVoiceCommands) ?? true;
       _pureBlackMode = prefs.getBool(_prefPureBlackMode) ?? false;
       _punctuationInsert = prefs.getBool(_prefPunctuationInsert) ?? false;
+      final punctuationX = prefs.getDouble(_prefPunctuationKeyX);
+      final punctuationY = prefs.getDouble(_prefPunctuationKeyY);
+      if (punctuationX != null && punctuationY != null) {
+        _punctuationKeyOffset = Offset(punctuationX, punctuationY);
+      }
       if (!_filterPunctuation) {
         _convertSpokenPunctuation = false;
       }
@@ -213,6 +221,14 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       prefs.setBool(_prefEnableVoiceCommands, _enableVoiceCommands),
       prefs.setBool(_prefPureBlackMode, _pureBlackMode),
       prefs.setBool(_prefPunctuationInsert, _punctuationInsert),
+    ]);
+  }
+
+  Future<void> _savePunctuationKeyOffset(Offset offset) async {
+    final prefs = await SharedPreferences.getInstance();
+    await Future.wait(<Future<bool>>[
+      prefs.setDouble(_prefPunctuationKeyX, offset.dx),
+      prefs.setDouble(_prefPunctuationKeyY, offset.dy),
     ]);
   }
 
@@ -453,6 +469,70 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     });
   }
 
+  void _sendBackspace() {
+    _send(<String, Object?>{
+      'type': 'ops',
+      'token': _tokenController.text.trim(),
+      'seq': ++_seq,
+      'ops': <Map<String, Object?>>[
+        <String, Object?>{'type': 'backspace', 'count': 1},
+      ],
+    });
+  }
+
+  Offset _resolvedPunctuationOffset(BoxConstraints constraints) {
+    final stageRect = _stageRect(constraints);
+    final relative =
+        _punctuationKeyOffset ?? _defaultPunctuationOffset(stageRect);
+    return _clampPunctuationOffset(stageRect.topLeft + relative, constraints);
+  }
+
+  Rect _stageRect(BoxConstraints constraints) {
+    final stageWidth = constraints.maxWidth.clamp(280.0, 820.0);
+    final stageHeight = stageWidth / (820 / 680);
+    final stageTop = 92 + ((constraints.maxHeight - 92 - stageHeight) / 2);
+    return Rect.fromLTWH(
+      (constraints.maxWidth - stageWidth) / 2,
+      stageTop,
+      stageWidth,
+      stageHeight,
+    );
+  }
+
+  Offset _defaultPunctuationOffset(Rect stageRect) {
+    return Offset(
+      (stageRect.width - _PunctuationToolbar.width) / 2,
+      stageRect.height + 8,
+    );
+  }
+
+  Offset _clampPunctuationOffset(
+    Offset offset,
+    BoxConstraints constraints,
+  ) {
+    final maxX = (constraints.maxWidth - _PunctuationToolbar.width)
+        .clamp(0.0, double.infinity);
+    final maxY = (constraints.maxHeight - _PunctuationToolbar.height)
+        .clamp(0.0, double.infinity);
+    return Offset(
+      offset.dx.clamp(0.0, maxX),
+      offset.dy.clamp(0.0, maxY),
+    );
+  }
+
+  void _movePunctuationKey(Offset delta, BoxConstraints constraints) {
+    final stageRect = _stageRect(constraints);
+    final nextAbsolute = _clampPunctuationOffset(
+      _resolvedPunctuationOffset(constraints) + delta,
+      constraints,
+    );
+    final nextRelative = nextAbsolute - stageRect.topLeft;
+    setState(() {
+      _punctuationKeyOffset = nextRelative;
+    });
+    _savePunctuationKeyOffset(nextRelative);
+  }
+
   void _send(Map<String, Object?> message) {
     final socket = _socket;
     if (socket == null || socket.readyState != WebSocket.open) {
@@ -571,50 +651,58 @@ class _FlowVoicePageState extends State<FlowVoicePage>
           behavior: HitTestBehavior.opaque,
           onTap: _focusInputSoon,
           child: _VoiceBackground(
-            child: Stack(
-              children: <Widget>[
-                Positioned(
-                  left: 18,
-                  right: 18,
-                  top: 22,
-                  child: _Header(
-                    status: _status,
-                    statusText: _statusText,
-                    settingsActive: _filterPunctuation ||
-                        _convertSpokenPunctuation ||
-                        _enableVoiceCommands,
-                    onSettings: _openSettings,
-                    onFloatingInput: _openFloatingInput,
-                    onScan: _scanQrCode,
-                  ),
-                ),
-                Positioned.fill(
-                  top: 92,
-                  child: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        _SceneStage(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final punctuationOffset =
+                    _resolvedPunctuationOffset(constraints);
+                return Stack(
+                  children: <Widget>[
+                    Positioned(
+                      left: 18,
+                      right: 18,
+                      top: 22,
+                      child: _Header(
+                        status: _status,
+                        statusText: _statusText,
+                        settingsActive: _filterPunctuation ||
+                            _convertSpokenPunctuation ||
+                            _enableVoiceCommands,
+                        onSettings: _openSettings,
+                        onFloatingInput: _openFloatingInput,
+                        onScan: _scanQrCode,
+                      ),
+                    ),
+                    Positioned.fill(
+                      top: 92,
+                      child: Center(
+                        child: _SceneStage(
                           working: _recentlyTyping,
                           controller: _inputController,
                         ),
-                        if (_punctuationInsert) ...<Widget>[
-                          const SizedBox(height: 8),
-                          _PunctuationKey(onInsert: _insertPunctuation),
-                        ],
-                      ],
+                      ),
                     ),
-                  ),
-                ),
-                Positioned(
-                  left: 1,
-                  bottom: 1,
-                  child: _HiddenVoiceInput(
-                    controller: _inputController,
-                    focusNode: _inputFocusNode,
-                  ),
-                ),
-              ],
+                    if (_punctuationInsert)
+                      Positioned(
+                        left: punctuationOffset.dx,
+                        top: punctuationOffset.dy,
+                        child: _PunctuationToolbar(
+                          onInsert: _insertPunctuation,
+                          onBackspace: _sendBackspace,
+                          onMoved: (offset) =>
+                              _movePunctuationKey(offset, constraints),
+                        ),
+                      ),
+                    Positioned(
+                      left: 1,
+                      bottom: 1,
+                      child: _HiddenVoiceInput(
+                        controller: _inputController,
+                        focusNode: _inputFocusNode,
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ),
         ),
@@ -971,21 +1059,89 @@ class _SceneStage extends StatelessWidget {
   }
 }
 
-class _PunctuationKey extends StatefulWidget {
-  const _PunctuationKey({required this.onInsert});
+class _PunctuationToolbar extends StatefulWidget {
+  const _PunctuationToolbar({
+    required this.onInsert,
+    required this.onBackspace,
+    required this.onMoved,
+  });
 
+  static const double keySize = 54;
+  static const double gap = 10;
+  static const double width = keySize * 2 + gap;
+  static const double height = keySize;
+
+  final ValueChanged<String> onInsert;
+  final VoidCallback onBackspace;
+  final ValueChanged<Offset> onMoved;
+
+  @override
+  State<_PunctuationToolbar> createState() => _PunctuationToolbarState();
+}
+
+class _PunctuationToolbarState extends State<_PunctuationToolbar> {
+  Offset _lastDragOffset = Offset.zero;
+  bool _dragging = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {},
+      onLongPressStart: (_) {
+        _dragging = true;
+        _lastDragOffset = Offset.zero;
+      },
+      onLongPressMoveUpdate: (details) {
+        if (_dragging) {
+          final delta = details.offsetFromOrigin - _lastDragOffset;
+          _lastDragOffset = details.offsetFromOrigin;
+          widget.onMoved(delta);
+        }
+      },
+      onLongPressEnd: (_) {
+        _dragging = false;
+        _lastDragOffset = Offset.zero;
+      },
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          _PunctuationButton(
+            enabled: !_dragging,
+            onInsert: widget.onInsert,
+          ),
+          const SizedBox(width: _PunctuationToolbar.gap),
+          _BackspaceButton(
+            enabled: !_dragging,
+            onBackspace: widget.onBackspace,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PunctuationButton extends StatefulWidget {
+  const _PunctuationButton({
+    required this.enabled,
+    required this.onInsert,
+  });
+
+  final bool enabled;
   final ValueChanged<String> onInsert;
 
   @override
-  State<_PunctuationKey> createState() => _PunctuationKeyState();
+  State<_PunctuationButton> createState() => _PunctuationButtonState();
 }
 
-class _PunctuationKeyState extends State<_PunctuationKey> {
+class _PunctuationButtonState extends State<_PunctuationButton> {
   Offset? _downPosition;
   bool _handled = false;
 
   void _handleUp(PointerUpEvent event) {
-    if (_handled) {
+    if (!widget.enabled || _handled) {
+      _downPosition = null;
+      _handled = false;
       return;
     }
     final start = _downPosition;
@@ -993,11 +1149,6 @@ class _PunctuationKeyState extends State<_PunctuationKey> {
     _handled = true;
     final deltaY = start == null ? 0.0 : event.position.dy - start.dy;
     widget.onInsert(deltaY < -18 ? '。' : '，');
-  }
-
-  void _handleCancel(PointerCancelEvent event) {
-    _downPosition = null;
-    _handled = false;
   }
 
   @override
@@ -1013,7 +1164,7 @@ class _PunctuationKeyState extends State<_PunctuationKey> {
         },
         onPointerMove: (event) {
           final start = _downPosition;
-          if (start == null || _handled) {
+          if (!widget.enabled || start == null || _handled) {
             return;
           }
           if (event.position.dy - start.dy < -26) {
@@ -1022,11 +1173,44 @@ class _PunctuationKeyState extends State<_PunctuationKey> {
           }
         },
         onPointerUp: _handleUp,
-        onPointerCancel: _handleCancel,
+        onPointerCancel: (_) {
+          _downPosition = null;
+          _handled = false;
+        },
         child: const RepaintBoundary(
           child: CustomPaint(
             painter: _PunctuationKeyPainter(),
-            child: SizedBox(width: 68, height: 68),
+            child: SizedBox(
+              width: _PunctuationToolbar.keySize,
+              height: _PunctuationToolbar.keySize,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BackspaceButton extends StatelessWidget {
+  const _BackspaceButton({
+    required this.enabled,
+    required this.onBackspace,
+  });
+
+  final bool enabled;
+  final VoidCallback onBackspace;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: enabled ? onBackspace : null,
+      child: const RepaintBoundary(
+        child: CustomPaint(
+          painter: _BackspaceKeyPainter(),
+          child: SizedBox(
+            width: _PunctuationToolbar.keySize,
+            height: _PunctuationToolbar.keySize,
           ),
         ),
       ),
@@ -1044,10 +1228,10 @@ class _PunctuationKeyPainter extends CustomPainter {
     final borderPaint = Paint()
       ..color = const Color(0xFF111111)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 3;
-    final radius = Radius.circular(size.width * 0.22);
-    final buttonRect = Offset.zero & Size(size.width - 5, size.height - 5);
-    final shadowRect = buttonRect.shift(const Offset(5, 5));
+      ..strokeWidth = 2.5;
+    const radius = Radius.circular(15);
+    final buttonRect = Offset.zero & Size(size.width - 3, size.height - 3);
+    final shadowRect = buttonRect.shift(const Offset(3, 3));
     canvas.drawRRect(RRect.fromRectAndRadius(shadowRect, radius), shadowPaint);
     canvas.drawRRect(RRect.fromRectAndRadius(buttonRect, radius), buttonPaint);
     canvas.drawRRect(RRect.fromRectAndRadius(buttonRect, radius), borderPaint);
@@ -1061,7 +1245,7 @@ class _PunctuationKeyPainter extends CustomPainter {
         text: mark,
         style: const TextStyle(
           color: Color(0xFF050505),
-          fontSize: 24,
+          fontSize: 19,
           fontWeight: FontWeight.w900,
           height: 1,
         ),
@@ -1073,12 +1257,56 @@ class _PunctuationKeyPainter extends CustomPainter {
       );
     }
 
-    drawMark('。', 15);
-    drawMark('，', 35);
+    drawMark('。', 10);
+    drawMark('，', 27);
   }
 
   @override
   bool shouldRepaint(covariant _PunctuationKeyPainter oldDelegate) => false;
+}
+
+class _BackspaceKeyPainter extends CustomPainter {
+  const _BackspaceKeyPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final shadowPaint = Paint()..color = const Color(0xFF111111);
+    final buttonPaint = Paint()..color = Colors.white;
+    final borderPaint = Paint()
+      ..color = const Color(0xFF111111)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.5;
+    const radius = Radius.circular(15);
+    final buttonRect = Offset.zero & Size(size.width - 3, size.height - 3);
+    final shadowRect = buttonRect.shift(const Offset(3, 3));
+    canvas.drawRRect(RRect.fromRectAndRadius(shadowRect, radius), shadowPaint);
+    canvas.drawRRect(RRect.fromRectAndRadius(buttonRect, radius), buttonPaint);
+    canvas.drawRRect(RRect.fromRectAndRadius(buttonRect, radius), borderPaint);
+
+    final textPainter = TextPainter(
+      text: const TextSpan(
+        text: '×',
+        style: TextStyle(
+          color: Color(0xFF050505),
+          fontSize: 28,
+          fontWeight: FontWeight.w900,
+          height: 1,
+        ),
+      ),
+      textAlign: TextAlign.center,
+      textDirection: TextDirection.ltr,
+    )..layout();
+    textPainter.paint(
+      canvas,
+      Offset(
+        (buttonRect.width - textPainter.width) / 2,
+        (buttonRect.height - textPainter.height) / 2 - 1,
+      ),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _BackspaceKeyPainter oldDelegate) => false;
 }
 
 class _MonitorText extends StatelessWidget {
@@ -1293,7 +1521,7 @@ class _SettingsSheetV2 extends StatelessWidget {
               const SizedBox(height: 12),
               _SettingSwitch(
                 title: '标点插入',
-                description: '开启后在主体图标下方显示标点键；点击插入逗号，上划插入句号，不打断键盘语音输入。',
+                description: '开启后显示可拖动按键组；标点键点击逗号、上划句号，× 键执行 backspace。',
                 value: punctuationInsert,
                 onChanged: onPunctuationInsertChanged,
               ),
