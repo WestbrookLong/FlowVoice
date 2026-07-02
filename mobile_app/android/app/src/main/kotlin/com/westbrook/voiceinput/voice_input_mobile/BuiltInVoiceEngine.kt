@@ -9,18 +9,19 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import com.k2fsa.sherpa.onnx.EndpointConfig
 import com.k2fsa.sherpa.onnx.EndpointRule
 import com.k2fsa.sherpa.onnx.FeatureConfig
-import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
-import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import com.k2fsa.sherpa.onnx.getModelConfig
 import java.util.concurrent.atomic.AtomicBoolean
 
 object BuiltInVoiceEngine {
+    private const val TAG = "FlowVoiceSherpa"
     private const val SAMPLE_RATE = 16000
-    private const val MODEL_DIR = "sherpa-onnx-lstm-zh-2023-02-20"
+    private const val MODEL_TYPE = 20
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val recording = AtomicBoolean(false)
@@ -84,6 +85,9 @@ object BuiltInVoiceEngine {
                 bufferSize,
             )
             recorder = audioRecord
+            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                throw IllegalStateException("AudioRecord init failed: state=${audioRecord.state}")
+            }
             audioRecord.startRecording()
             postStatus(onStatus, "listening")
 
@@ -127,7 +131,9 @@ object BuiltInVoiceEngine {
             }
             postStatus(onStatus, "stopped")
         } catch (t: Throwable) {
-            postStatus(onStatus, "error:${t.message ?: t.javaClass.simpleName}")
+            Log.e(TAG, "Built-in voice failed", t)
+            val message = t.message?.takeIf { it.isNotBlank() } ?: t.javaClass.name
+            postStatus(onStatus, "error:${t.javaClass.simpleName}: $message")
         } finally {
             recording.set(false)
             stream?.release()
@@ -137,16 +143,9 @@ object BuiltInVoiceEngine {
     }
 
     private fun createRecognizer(context: Context): OnlineRecognizer {
-        val modelConfig = OnlineModelConfig(
-            transducer = OnlineTransducerModelConfig(
-                encoder = "$MODEL_DIR/encoder-epoch-11-avg-1.int8.onnx",
-                decoder = "$MODEL_DIR/decoder-epoch-11-avg-1.int8.onnx",
-                joiner = "$MODEL_DIR/joiner-epoch-11-avg-1.int8.onnx",
-            ),
-            tokens = "$MODEL_DIR/tokens.txt",
-            numThreads = 2,
-            modelType = "lstm",
-        )
+        val modelConfig = getModelConfig(MODEL_TYPE)
+            ?: throw IllegalStateException("Missing sherpa model config type $MODEL_TYPE")
+        modelConfig.numThreads = 2
         val config = OnlineRecognizerConfig(
             featConfig = FeatureConfig(sampleRate = SAMPLE_RATE),
             modelConfig = modelConfig,

@@ -142,6 +142,11 @@ class _FlowVoicePageState extends State<FlowVoicePage>
         _builtInVoiceListening =
             status == 'loading' || status == 'listening';
       });
+      if (status.startsWith('error:')) {
+        _showBuiltInVoiceDebugMessage(status.substring('error:'.length));
+      } else if (status == 'permission_missing') {
+        _showBuiltInVoiceDebugMessage('缺少麦克风权限，请允许 Flow Voice 使用麦克风。');
+      }
       return null;
     }
     if (call.method == 'builtInVoiceText') {
@@ -309,6 +314,24 @@ class _FlowVoicePageState extends State<FlowVoicePage>
         _builtInVoiceStatus = 'stopped';
       });
     }
+  }
+
+  void _showBuiltInVoiceDebugMessage(String message) {
+    if (!mounted || message.trim().isEmpty) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('自带语音错误：${message.trim()}'),
+          duration: const Duration(seconds: 8),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    });
   }
 
   Future<void> _loadPrefs() async {
