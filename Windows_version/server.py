@@ -618,6 +618,16 @@ def create_app(
                         session.text_session.text = text[:MAX_SYNC_TEXT_LEN]
                     else:
                         session.sync_processed_text(text)
+                elif message_type == "insert_text":
+                    text = payload.get("text")
+                    if not isinstance(text, str):
+                        raise ValueError("insert_text.text must be a string")
+                    if text not in {"，", "。", ",", "."}:
+                        raise ValueError("insert_text.text must be a supported punctuation mark")
+                    log(f"[inject] punctuation button {text!r}")
+                    type_text(text)
+                    if typing_stats is not None:
+                        typing_stats.record(text, "mobile")
                 elif message_type == "reset_session":
                     if text_agent is not None and text_agent.should_capture_text():
                         text_agent.update_text("", "", active_source_text="")

@@ -11,6 +11,7 @@ const String _prefFilterPunctuation = 'filterPunctuation';
 const String _prefConvertSpokenPunctuation = 'convertSpokenPunctuation';
 const String _prefEnableVoiceCommands = 'enableVoiceCommands';
 const String _prefPureBlackMode = 'pureBlackMode';
+const String _prefPunctuationInsert = 'punctuationInsert';
 
 void main() {
   runApp(const FlowVoiceApp());
@@ -75,6 +76,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   bool _convertSpokenPunctuation = true;
   bool _enableVoiceCommands = true;
   bool _pureBlackMode = false;
+  bool _punctuationInsert = false;
   bool _settingsOpen = false;
   bool _scannerOpen = false;
   bool _recentlyTyping = false;
@@ -194,6 +196,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
           prefs.getBool(_prefConvertSpokenPunctuation) ?? true;
       _enableVoiceCommands = prefs.getBool(_prefEnableVoiceCommands) ?? true;
       _pureBlackMode = prefs.getBool(_prefPureBlackMode) ?? false;
+      _punctuationInsert = prefs.getBool(_prefPunctuationInsert) ?? false;
       if (!_filterPunctuation) {
         _convertSpokenPunctuation = false;
       }
@@ -209,6 +212,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       prefs.setBool(_prefConvertSpokenPunctuation, _convertSpokenPunctuation),
       prefs.setBool(_prefEnableVoiceCommands, _enableVoiceCommands),
       prefs.setBool(_prefPureBlackMode, _pureBlackMode),
+      prefs.setBool(_prefPunctuationInsert, _punctuationInsert),
     ]);
   }
 
@@ -439,6 +443,16 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     _send(message);
   }
 
+  void _insertPunctuation(String text) {
+    _send(<String, Object?>{
+      'type': 'insert_text',
+      'token': _tokenController.text.trim(),
+      'seq': ++_seq,
+      'text': text,
+      'source': 'punctuation_button',
+    });
+  }
+
   void _send(Map<String, Object?> message) {
     final socket = _socket;
     if (socket == null || socket.readyState != WebSocket.open) {
@@ -489,6 +503,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                   convertSpokenPunctuation: _convertSpokenPunctuation,
                   enableVoiceCommands: _enableVoiceCommands,
                   pureBlackMode: _pureBlackMode,
+                  punctuationInsert: _punctuationInsert,
                   onFilterChanged: (value) => update(() {
                     _filterPunctuation = value;
                     if (!value) {
@@ -503,6 +518,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                       update(() => _enableVoiceCommands = value),
                   onPureBlackChanged: (value) =>
                       update(() => _pureBlackMode = value),
+                  onPunctuationInsertChanged: (value) =>
+                      update(() => _punctuationInsert = value),
                   onClose: () => Navigator.of(context).pop(),
                 ),
               ),
@@ -574,9 +591,18 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                 Positioned.fill(
                   top: 92,
                   child: Center(
-                    child: _SceneStage(
-                      working: _recentlyTyping,
-                      controller: _inputController,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        _SceneStage(
+                          working: _recentlyTyping,
+                          controller: _inputController,
+                        ),
+                        if (_punctuationInsert) ...<Widget>[
+                          const SizedBox(height: 8),
+                          _PunctuationKey(onInsert: _insertPunctuation),
+                        ],
+                      ],
                     ),
                   ),
                 ),
@@ -945,6 +971,116 @@ class _SceneStage extends StatelessWidget {
   }
 }
 
+class _PunctuationKey extends StatefulWidget {
+  const _PunctuationKey({required this.onInsert});
+
+  final ValueChanged<String> onInsert;
+
+  @override
+  State<_PunctuationKey> createState() => _PunctuationKeyState();
+}
+
+class _PunctuationKeyState extends State<_PunctuationKey> {
+  Offset? _downPosition;
+  bool _handled = false;
+
+  void _handleUp(PointerUpEvent event) {
+    if (_handled) {
+      return;
+    }
+    final start = _downPosition;
+    _downPosition = null;
+    _handled = true;
+    final deltaY = start == null ? 0.0 : event.position.dy - start.dy;
+    widget.onInsert(deltaY < -18 ? '。' : '，');
+  }
+
+  void _handleCancel(PointerCancelEvent event) {
+    _downPosition = null;
+    _handled = false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {},
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (event) {
+          _downPosition = event.position;
+          _handled = false;
+        },
+        onPointerMove: (event) {
+          final start = _downPosition;
+          if (start == null || _handled) {
+            return;
+          }
+          if (event.position.dy - start.dy < -26) {
+            _handled = true;
+            widget.onInsert('。');
+          }
+        },
+        onPointerUp: _handleUp,
+        onPointerCancel: _handleCancel,
+        child: const RepaintBoundary(
+          child: CustomPaint(
+            painter: _PunctuationKeyPainter(),
+            child: SizedBox(width: 68, height: 68),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PunctuationKeyPainter extends CustomPainter {
+  const _PunctuationKeyPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final shadowPaint = Paint()..color = const Color(0xFF111111);
+    final buttonPaint = Paint()..color = Colors.white;
+    final borderPaint = Paint()
+      ..color = const Color(0xFF111111)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+    final radius = Radius.circular(size.width * 0.22);
+    final buttonRect = Offset.zero & Size(size.width - 5, size.height - 5);
+    final shadowRect = buttonRect.shift(const Offset(5, 5));
+    canvas.drawRRect(RRect.fromRectAndRadius(shadowRect, radius), shadowPaint);
+    canvas.drawRRect(RRect.fromRectAndRadius(buttonRect, radius), buttonPaint);
+    canvas.drawRRect(RRect.fromRectAndRadius(buttonRect, radius), borderPaint);
+
+    final textPainter = TextPainter(
+      textAlign: TextAlign.center,
+      textDirection: TextDirection.ltr,
+    );
+    void drawMark(String mark, double y) {
+      textPainter.text = TextSpan(
+        text: mark,
+        style: const TextStyle(
+          color: Color(0xFF050505),
+          fontSize: 24,
+          fontWeight: FontWeight.w900,
+          height: 1,
+        ),
+      );
+      textPainter.layout();
+      textPainter.paint(
+        canvas,
+        Offset((buttonRect.width - textPainter.width) / 2, y),
+      );
+    }
+
+    drawMark('。', 15);
+    drawMark('，', 35);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PunctuationKeyPainter oldDelegate) => false;
+}
+
 class _MonitorText extends StatelessWidget {
   const _MonitorText({required this.controller});
 
@@ -1061,10 +1197,12 @@ class _SettingsSheetV2 extends StatelessWidget {
     required this.convertSpokenPunctuation,
     required this.enableVoiceCommands,
     required this.pureBlackMode,
+    required this.punctuationInsert,
     required this.onFilterChanged,
     required this.onConvertChanged,
     required this.onCommandChanged,
     required this.onPureBlackChanged,
+    required this.onPunctuationInsertChanged,
     required this.onClose,
   });
 
@@ -1072,10 +1210,12 @@ class _SettingsSheetV2 extends StatelessWidget {
   final bool convertSpokenPunctuation;
   final bool enableVoiceCommands;
   final bool pureBlackMode;
+  final bool punctuationInsert;
   final ValueChanged<bool> onFilterChanged;
   final ValueChanged<bool>? onConvertChanged;
   final ValueChanged<bool> onCommandChanged;
   final ValueChanged<bool> onPureBlackChanged;
+  final ValueChanged<bool> onPunctuationInsertChanged;
   final VoidCallback onClose;
 
   @override
@@ -1149,6 +1289,13 @@ class _SettingsSheetV2 extends StatelessWidget {
                 description: '开启后主界面变为纯黑屏，点击屏幕会持续唤起输入法；通过右上角设置关闭后恢复当前界面。',
                 value: pureBlackMode,
                 onChanged: onPureBlackChanged,
+              ),
+              const SizedBox(height: 12),
+              _SettingSwitch(
+                title: '标点插入',
+                description: '开启后在主体图标下方显示标点键；点击插入逗号，上划插入句号，不打断键盘语音输入。',
+                value: punctuationInsert,
+                onChanged: onPunctuationInsertChanged,
               ),
               const SizedBox(height: 12),
               _VoiceButton(label: '完成', onPressed: onClose),
