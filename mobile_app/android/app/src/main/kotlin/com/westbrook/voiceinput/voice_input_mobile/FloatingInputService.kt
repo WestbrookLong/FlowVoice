@@ -33,6 +33,7 @@ class FloatingInputService : Service() {
     private var suppressTextCallback = false
     private var builtInVoiceMode = false
     private var voiceOverlayStatus = "loading"
+    private var autoVoiceClickEnabled = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -47,6 +48,8 @@ class FloatingInputService : Service() {
                 val text = intent?.getStringExtra(EXTRA_TEXT).orEmpty()
                 val connected = intent?.getBooleanExtra(EXTRA_CONNECTED, false) ?: false
                 val builtInVoice = intent?.getBooleanExtra(EXTRA_BUILT_IN_VOICE, false) ?: false
+                autoVoiceClickEnabled =
+                    intent?.getBooleanExtra(EXTRA_AUTO_VOICE_CLICK, false) ?: false
                 showOverlay(text, connected, builtInVoice)
             }
         }
@@ -341,7 +344,37 @@ class FloatingInputService : Service() {
         input.postDelayed({
             val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
             imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+            maybeAutoClickVoiceKey(input)
         }, 80)
+    }
+
+    private fun maybeAutoClickVoiceKey(anchor: View) {
+        if (!autoVoiceClickEnabled || builtInVoiceMode) {
+            return
+        }
+        if (!VoiceKeyClickAccessibilityService.isRunning()) {
+            MainActivity.sendOverlayDiagnostic("accessibility_not_running")
+            return
+        }
+        anchor.postDelayed({
+            val prefs = getSharedPreferences(VoiceClickCalibrationService.PREFS_NAME, MODE_PRIVATE)
+            if (!prefs.contains(VoiceClickCalibrationService.KEY_X) ||
+                !prefs.contains(VoiceClickCalibrationService.KEY_Y)
+            ) {
+                MainActivity.sendOverlayDiagnostic("voice_click_point_missing")
+                return@postDelayed
+            }
+            val x = prefs.getFloat(VoiceClickCalibrationService.KEY_X, -1f)
+            val y = prefs.getFloat(VoiceClickCalibrationService.KEY_Y, -1f)
+            if (x < 0f || y < 0f) {
+                MainActivity.sendOverlayDiagnostic("voice_click_point_invalid")
+                return@postDelayed
+            }
+            val clicked = VoiceKeyClickAccessibilityService.click(x, y)
+            if (!clicked) {
+                MainActivity.sendOverlayDiagnostic("voice_click_dispatch_failed")
+            }
+        }, AUTO_VOICE_CLICK_DELAY_MS)
     }
 
     private fun releaseInputFocus(input: EditText) {
@@ -481,6 +514,8 @@ class FloatingInputService : Service() {
         const val EXTRA_TEXT = "text"
         const val EXTRA_CONNECTED = "connected"
         const val EXTRA_BUILT_IN_VOICE = "builtInVoice"
+        const val EXTRA_AUTO_VOICE_CLICK = "autoVoiceClick"
+        private const val AUTO_VOICE_CLICK_DELAY_MS = 500L
         private const val VOICE_DOCK_TAG = "voice_dock"
         private const val VOICE_BUTTON_TAG = "voice_button"
         private const val NOTIFICATION_ID = 4108

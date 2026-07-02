@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="voice_key_click_accessibility_description">Allow Flow Voice to tap the calibrated keyboard voice button after opening the floating input.</string>
+</resources>

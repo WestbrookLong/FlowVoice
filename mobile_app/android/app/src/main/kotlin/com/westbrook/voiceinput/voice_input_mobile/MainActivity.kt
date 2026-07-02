@@ -31,6 +31,23 @@ class MainActivity : FlutterActivity() {
                     requestRecordAudioPermission()
                     result.success(null)
                 }
+                "isVoiceClickAccessibilityEnabled" -> {
+                    result.success(VoiceKeyClickAccessibilityService.isEnabled(this))
+                }
+                "openAccessibilitySettings" -> {
+                    openAccessibilitySettings()
+                    result.success(null)
+                }
+                "startVoiceClickCalibration" -> {
+                    if (!canDrawOverlays()) {
+                        result.success(false)
+                        return@setMethodCallHandler
+                    }
+                    val intent = Intent(this, VoiceClickCalibrationService::class.java)
+                        .setAction(VoiceClickCalibrationService.ACTION_START)
+                    startService(intent)
+                    result.success(true)
+                }
                 "startBuiltInVoice" -> {
                     BuiltInVoiceEngine.start(
                         context = applicationContext,
@@ -47,6 +64,7 @@ class MainActivity : FlutterActivity() {
                     val text = call.argument<String>("text").orEmpty()
                     val connected = call.argument<Boolean>("connected") ?: false
                     val builtInVoice = call.argument<Boolean>("builtInVoice") ?: false
+                    val autoVoiceClick = call.argument<Boolean>("autoVoiceClick") ?: false
                     if (!canDrawOverlays()) {
                         result.success(false)
                         return@setMethodCallHandler
@@ -56,6 +74,7 @@ class MainActivity : FlutterActivity() {
                         .putExtra(FloatingInputService.EXTRA_TEXT, text)
                         .putExtra(FloatingInputService.EXTRA_CONNECTED, connected)
                         .putExtra(FloatingInputService.EXTRA_BUILT_IN_VOICE, builtInVoice)
+                        .putExtra(FloatingInputService.EXTRA_AUTO_VOICE_CLICK, autoVoiceClick)
                     startService(intent)
                     result.success(true)
                 }
@@ -90,6 +109,12 @@ class MainActivity : FlutterActivity() {
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
             Uri.parse("package:$packageName"),
         )
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
+    }
+
+    private fun openAccessibilitySettings() {
+        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         startActivity(intent)
     }
@@ -131,6 +156,10 @@ class MainActivity : FlutterActivity() {
 
         fun sendBuiltInVoiceStatus(status: String) {
             overlayChannel?.invokeMethod("builtInVoiceStatus", status)
+        }
+
+        fun sendOverlayDiagnostic(message: String) {
+            overlayChannel?.invokeMethod("overlayDiagnostic", message)
         }
     }
 }

@@ -13,6 +13,7 @@ const String _prefEnableVoiceCommands = 'enableVoiceCommands';
 const String _prefPureBlackMode = 'pureBlackMode';
 const String _prefPunctuationInsert = 'punctuationInsert';
 const String _prefBuiltInVoiceInput = 'builtInVoiceInput';
+const String _prefAutoVoiceKeyClick = 'autoVoiceKeyClick';
 const String _prefPunctuationKeyX = 'punctuationKeyX';
 const String _prefPunctuationKeyY = 'punctuationKeyY';
 
@@ -81,6 +82,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   bool _pureBlackMode = false;
   bool _punctuationInsert = false;
   bool _builtInVoiceInput = false;
+  bool _autoVoiceKeyClick = false;
   bool _builtInVoiceListening = false;
   String _builtInVoiceStatus = 'ready';
   String _builtInVoiceBaseText = '';
@@ -149,6 +151,13 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       }
       return null;
     }
+    if (call.method == 'overlayDiagnostic') {
+      final message = call.arguments is String ? call.arguments as String : '';
+      if (message.isNotEmpty) {
+        _showOverlayDiagnostic(message);
+      }
+      return null;
+    }
     if (call.method == 'builtInVoiceText') {
       final args = call.arguments;
       if (args is! Map) {
@@ -210,6 +219,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
         'text': _inputController.text,
         'connected': _status == BridgeStatus.connected,
         'builtInVoice': _builtInVoiceInput,
+        'autoVoiceClick': _autoVoiceKeyClick && !_builtInVoiceInput,
       });
       return started ?? false;
     } catch (_) {
@@ -334,6 +344,31 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     });
   }
 
+  void _showOverlayDiagnostic(String message) {
+    final text = switch (message) {
+      'accessibility_not_running' => '请先开启 Flow Voice 无障碍服务。',
+      'voice_click_point_missing' => '请先校准语音键点击位置。',
+      'voice_click_point_invalid' => '语音键点击位置无效，请重新校准。',
+      'voice_click_dispatch_failed' => '自动点击失败，请检查无障碍权限。',
+      _ => message,
+    };
+    if (!mounted) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(text),
+          duration: const Duration(seconds: 5),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    });
+  }
+
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) {
@@ -347,6 +382,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       _pureBlackMode = prefs.getBool(_prefPureBlackMode) ?? false;
       _punctuationInsert = prefs.getBool(_prefPunctuationInsert) ?? false;
       _builtInVoiceInput = prefs.getBool(_prefBuiltInVoiceInput) ?? false;
+      _autoVoiceKeyClick = prefs.getBool(_prefAutoVoiceKeyClick) ?? false;
       final punctuationX = prefs.getDouble(_prefPunctuationKeyX);
       final punctuationY = prefs.getDouble(_prefPunctuationKeyY);
       if (punctuationX != null && punctuationY != null) {
@@ -369,7 +405,40 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       prefs.setBool(_prefPureBlackMode, _pureBlackMode),
       prefs.setBool(_prefPunctuationInsert, _punctuationInsert),
       prefs.setBool(_prefBuiltInVoiceInput, _builtInVoiceInput),
+      prefs.setBool(_prefAutoVoiceKeyClick, _autoVoiceKeyClick),
     ]);
+  }
+
+  Future<void> _openAccessibilitySettings() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      await _overlayChannel.invokeMethod<void>('openAccessibilitySettings');
+    } catch (_) {}
+  }
+
+  Future<void> _startVoiceClickCalibration() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      final granted =
+          await _overlayChannel.invokeMethod<bool>('hasOverlayPermission') ??
+              false;
+      if (!granted) {
+        await _overlayChannel.invokeMethod<void>('requestOverlayPermission');
+        return;
+      }
+      final started = await _overlayChannel
+              .invokeMethod<bool>('startVoiceClickCalibration') ??
+          false;
+      if (!started) {
+        _showOverlayDiagnostic('voice_click_point_invalid');
+      }
+    } catch (_) {
+      _showOverlayDiagnostic('voice_click_dispatch_failed');
+    }
   }
 
   Future<void> _savePunctuationKeyOffset(Offset offset) async {
@@ -740,6 +809,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                   pureBlackMode: _pureBlackMode,
                   punctuationInsert: _punctuationInsert,
                   builtInVoiceInput: _builtInVoiceInput,
+                  autoVoiceKeyClick: _autoVoiceKeyClick,
                   onFilterChanged: (value) => update(() {
                     _filterPunctuation = value;
                     if (!value) {
@@ -765,6 +835,10 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                       _builtInVoiceBaseText = _inputController.text;
                     }
                   }),
+                  onAutoVoiceKeyClickChanged: (value) =>
+                      update(() => _autoVoiceKeyClick = value),
+                  onOpenAccessibilitySettings: _openAccessibilitySettings,
+                  onCalibrateVoiceKeyClick: _startVoiceClickCalibration,
                   onClose: () => Navigator.of(context).pop(),
                 ),
               ),
@@ -832,7 +906,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                         settingsActive: _filterPunctuation ||
                             _convertSpokenPunctuation ||
                             _enableVoiceCommands ||
-                            _builtInVoiceInput,
+                            _builtInVoiceInput ||
+                            _autoVoiceKeyClick,
                         onSettings: _openSettings,
                         onFloatingInput: _openFloatingInput,
                         onScan: _scanQrCode,
@@ -1704,12 +1779,16 @@ class _SettingsSheetV2 extends StatelessWidget {
     required this.pureBlackMode,
     required this.punctuationInsert,
     required this.builtInVoiceInput,
+    required this.autoVoiceKeyClick,
     required this.onFilterChanged,
     required this.onConvertChanged,
     required this.onCommandChanged,
     required this.onPureBlackChanged,
     required this.onPunctuationInsertChanged,
     required this.onBuiltInVoiceInputChanged,
+    required this.onAutoVoiceKeyClickChanged,
+    required this.onOpenAccessibilitySettings,
+    required this.onCalibrateVoiceKeyClick,
     required this.onClose,
   });
 
@@ -1719,12 +1798,16 @@ class _SettingsSheetV2 extends StatelessWidget {
   final bool pureBlackMode;
   final bool punctuationInsert;
   final bool builtInVoiceInput;
+  final bool autoVoiceKeyClick;
   final ValueChanged<bool> onFilterChanged;
   final ValueChanged<bool>? onConvertChanged;
   final ValueChanged<bool> onCommandChanged;
   final ValueChanged<bool> onPureBlackChanged;
   final ValueChanged<bool> onPunctuationInsertChanged;
   final ValueChanged<bool> onBuiltInVoiceInputChanged;
+  final ValueChanged<bool> onAutoVoiceKeyClickChanged;
+  final VoidCallback onOpenAccessibilitySettings;
+  final VoidCallback onCalibrateVoiceKeyClick;
   final VoidCallback onClose;
 
   @override
@@ -1812,6 +1895,23 @@ class _SettingsSheetV2 extends StatelessWidget {
                 description: '开启后不依赖系统输入法键盘，使用内置 sherpa-onnx 离线模型识别语音。',
                 value: builtInVoiceInput,
                 onChanged: onBuiltInVoiceInputChanged,
+              ),
+              const SizedBox(height: 12),
+              _SettingSwitch(
+                title: '自动点击键盘语音键',
+                description: '普通悬浮窗唤起键盘后，500ms 后点击你校准的位置，用来打开系统输入法语音输入。',
+                value: autoVoiceKeyClick,
+                onChanged: onAutoVoiceKeyClickChanged,
+              ),
+              const SizedBox(height: 10),
+              _VoiceButton(
+                label: '打开无障碍设置',
+                onPressed: onOpenAccessibilitySettings,
+              ),
+              const SizedBox(height: 10),
+              _VoiceButton(
+                label: '调整语音键位置',
+                onPressed: onCalibrateVoiceKeyClick,
               ),
               const SizedBox(height: 12),
               _VoiceButton(label: '完成', onPressed: onClose),
