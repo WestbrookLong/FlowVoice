@@ -5,7 +5,10 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite/sqflite.dart';
 
 const String _prefFilterPunctuation = 'filterPunctuation';
 const String _prefConvertSpokenPunctuation = 'convertSpokenPunctuation';
@@ -16,6 +19,7 @@ const String _prefBuiltInVoiceInput = 'builtInVoiceInput';
 const String _prefAutoVoiceKeyClick = 'autoVoiceKeyClick';
 const String _prefAutoVoiceKeyClickDelayMs = 'autoVoiceKeyClickDelayMs';
 const String _prefAutoVoiceKeyClickDurationMs = 'autoVoiceKeyClickDurationMs';
+const String _prefTypeMemo = 'typeMemo';
 const String _prefPunctuationKeyX = 'punctuationKeyX';
 const String _prefPunctuationKeyY = 'punctuationKeyY';
 
@@ -53,6 +57,129 @@ enum BridgeStatus {
   error,
 }
 
+class TypeMemoStore {
+  TypeMemoStore._();
+
+  static final TypeMemoStore instance = TypeMemoStore._();
+
+  Database? _db;
+
+  Future<Database> get database async {
+    final existing = _db;
+    if (existing != null) {
+      return existing;
+    }
+    final dir = await getApplicationDocumentsDirectory();
+    final dbPath = p.join(dir.path, 'type_memo.db');
+    final db = await openDatabase(
+      dbPath,
+      version: 2,
+      onCreate: (db, version) async {
+        await _createDailyTable(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await _createDailyTable(db);
+        }
+      },
+    );
+    _db = db;
+    return db;
+  }
+
+  static Future<void> _createDailyTable(Database db) async {
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS type_memo_days (
+  day TEXT PRIMARY KEY,
+  text TEXT NOT NULL
+)
+''');
+  }
+
+  Future<void> upsertDayText(String text, {DateTime? now}) async {
+    final time = now ?? DateTime.now();
+    final db = await database;
+    await db.insert(
+      'type_memo_days',
+      <String, Object?>{
+        'day': _formatDay(time),
+        'text': text,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<String> loadDocument({String? day}) async {
+    final db = await database;
+    if (day != null) {
+      final rows = await db.query(
+        'type_memo_days',
+        columns: <String>['text'],
+        where: 'day = ?',
+        whereArgs: <Object?>[day],
+        limit: 1,
+      );
+      if (rows.isEmpty) {
+        return '';
+      }
+      return rows.first['text'] as String;
+    }
+
+    final rows = await db.query(
+      'type_memo_days',
+      columns: <String>['day', 'text'],
+      orderBy: 'day ASC',
+    );
+    final buffer = StringBuffer();
+    for (final row in rows) {
+      final rowDay = row['day'] as String;
+      final text = row['text'] as String;
+      if (text.isEmpty) {
+        continue;
+      }
+      if (buffer.isNotEmpty) {
+        buffer.writeln();
+      }
+      buffer.writeln('===== $rowDay =====');
+      buffer.write(text);
+      if (!text.endsWith('\n')) {
+        buffer.writeln();
+      }
+    }
+    return buffer.toString();
+  }
+
+  Future<List<String>> loadDays() async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      "SELECT day FROM type_memo_days WHERE text <> '' ORDER BY day DESC",
+    );
+    return rows.map((row) => row['day'] as String).toList();
+  }
+
+  Future<void> deleteDay(String day) async {
+    final db = await database;
+    await db.delete(
+      'type_memo_days',
+      where: 'day = ?',
+      whereArgs: <Object?>[day],
+    );
+  }
+
+  Future<void> deleteAll() async {
+    final db = await database;
+    await db.delete('type_memo_days');
+  }
+
+  static String _formatDay(DateTime time) {
+    final local = time.toLocal();
+    final year = local.year.toString().padLeft(4, '0');
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    return '$year-$month-$day';
+  }
+}
+
 class FlowVoicePage extends StatefulWidget {
   const FlowVoicePage({super.key});
 
@@ -85,8 +212,10 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   bool _punctuationInsert = false;
   bool _builtInVoiceInput = false;
   bool _autoVoiceKeyClick = false;
+  bool _typeMemo = false;
   double _autoVoiceKeyClickDelayMs = 500;
   double _autoVoiceKeyClickDurationMs = 500;
+  String _lastTypeMemoText = '';
   bool _builtInVoiceListening = false;
   String _builtInVoiceStatus = 'ready';
   String _builtInVoiceBaseText = '';
@@ -145,8 +274,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       }
       setState(() {
         _builtInVoiceStatus = status;
-        _builtInVoiceListening =
-            status == 'loading' || status == 'listening';
+        _builtInVoiceListening = status == 'loading' || status == 'listening';
       });
       if (status.startsWith('error:')) {
         _showBuiltInVoiceDebugMessage(status.substring('error:'.length));
@@ -180,6 +308,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
           selection: TextSelection.collapsed(offset: next.length),
         );
         _overlayUpdatingInput = false;
+        _recordTypeMemoChange(next);
         _markRecentlyTyping();
         _syncInput();
       }
@@ -201,6 +330,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       selection: TextSelection.collapsed(offset: text.length),
     );
     _overlayUpdatingInput = false;
+    _recordTypeMemoChange(text);
     _markRecentlyTyping();
     _syncInput();
     return null;
@@ -268,9 +398,9 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       return false;
     }
     try {
-      final granted =
-          await _overlayChannel.invokeMethod<bool>('hasRecordAudioPermission') ??
-              false;
+      final granted = await _overlayChannel
+              .invokeMethod<bool>('hasRecordAudioPermission') ??
+          false;
       if (granted) {
         return true;
       }
@@ -389,6 +519,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       _punctuationInsert = prefs.getBool(_prefPunctuationInsert) ?? false;
       _builtInVoiceInput = prefs.getBool(_prefBuiltInVoiceInput) ?? false;
       _autoVoiceKeyClick = prefs.getBool(_prefAutoVoiceKeyClick) ?? false;
+      _typeMemo = prefs.getBool(_prefTypeMemo) ?? false;
       _autoVoiceKeyClickDelayMs =
           (prefs.getInt(_prefAutoVoiceKeyClickDelayMs) ?? 500).toDouble();
       _autoVoiceKeyClickDurationMs =
@@ -401,6 +532,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       if (!_filterPunctuation) {
         _convertSpokenPunctuation = false;
       }
+      _lastTypeMemoText = _inputController.text;
     });
     _syncInput(force: true);
     _focusInputSoon(force: true);
@@ -416,6 +548,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       prefs.setBool(_prefPunctuationInsert, _punctuationInsert),
       prefs.setBool(_prefBuiltInVoiceInput, _builtInVoiceInput),
       prefs.setBool(_prefAutoVoiceKeyClick, _autoVoiceKeyClick),
+      prefs.setBool(_prefTypeMemo, _typeMemo),
       prefs.setInt(
         _prefAutoVoiceKeyClickDelayMs,
         _autoVoiceKeyClickDelayMs.round(),
@@ -496,8 +629,21 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     if (_overlayUpdatingInput) {
       return;
     }
+    _recordTypeMemoChange(_inputController.text);
     _markRecentlyTyping();
     _syncInput();
+  }
+
+  void _recordTypeMemoChange(String currentText) {
+    if (!_typeMemo) {
+      _lastTypeMemoText = currentText;
+      return;
+    }
+    if (currentText == _lastTypeMemoText) {
+      return;
+    }
+    _lastTypeMemoText = currentText;
+    unawaited(TypeMemoStore.instance.upsertDayText(currentText));
   }
 
   void _markRecentlyTyping() {
@@ -828,6 +974,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                   punctuationInsert: _punctuationInsert,
                   builtInVoiceInput: _builtInVoiceInput,
                   autoVoiceKeyClick: _autoVoiceKeyClick,
+                  typeMemo: _typeMemo,
                   autoVoiceKeyClickDelayMs: _autoVoiceKeyClickDelayMs,
                   autoVoiceKeyClickDurationMs: _autoVoiceKeyClickDurationMs,
                   onFilterChanged: (value) => update(() {
@@ -861,6 +1008,11 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                       update(() => _autoVoiceKeyClickDelayMs = value),
                   onAutoVoiceKeyClickDurationChanged: (value) =>
                       update(() => _autoVoiceKeyClickDurationMs = value),
+                  onTypeMemoChanged: (value) => update(() {
+                    _typeMemo = value;
+                    _lastTypeMemoText = _inputController.text;
+                  }),
+                  onOpenTypeMemo: _openTypeMemoPage,
                   onOpenAccessibilitySettings: _openAccessibilitySettings,
                   onCalibrateVoiceKeyClick: _startVoiceClickCalibration,
                   onClose: () => Navigator.of(context).pop(),
@@ -873,6 +1025,20 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     ).whenComplete(() {
       _settingsOpen = false;
       _focusInputSoon(force: _pureBlackMode);
+    });
+  }
+
+  void _openTypeMemoPage() {
+    Navigator.of(context).pop();
+    Future<void>.delayed(const Duration(milliseconds: 180), () {
+      if (!mounted) {
+        return;
+      }
+      Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => const TypeMemoPage(),
+        ),
+      );
     });
   }
 
@@ -1876,6 +2042,7 @@ class _SettingsSheetV2 extends StatelessWidget {
     required this.punctuationInsert,
     required this.builtInVoiceInput,
     required this.autoVoiceKeyClick,
+    required this.typeMemo,
     required this.autoVoiceKeyClickDelayMs,
     required this.autoVoiceKeyClickDurationMs,
     required this.onFilterChanged,
@@ -1885,6 +2052,8 @@ class _SettingsSheetV2 extends StatelessWidget {
     required this.onPunctuationInsertChanged,
     required this.onBuiltInVoiceInputChanged,
     required this.onAutoVoiceKeyClickChanged,
+    required this.onTypeMemoChanged,
+    required this.onOpenTypeMemo,
     required this.onAutoVoiceKeyClickDelayChanged,
     required this.onAutoVoiceKeyClickDurationChanged,
     required this.onOpenAccessibilitySettings,
@@ -1899,6 +2068,7 @@ class _SettingsSheetV2 extends StatelessWidget {
   final bool punctuationInsert;
   final bool builtInVoiceInput;
   final bool autoVoiceKeyClick;
+  final bool typeMemo;
   final double autoVoiceKeyClickDelayMs;
   final double autoVoiceKeyClickDurationMs;
   final ValueChanged<bool> onFilterChanged;
@@ -1908,6 +2078,8 @@ class _SettingsSheetV2 extends StatelessWidget {
   final ValueChanged<bool> onPunctuationInsertChanged;
   final ValueChanged<bool> onBuiltInVoiceInputChanged;
   final ValueChanged<bool> onAutoVoiceKeyClickChanged;
+  final ValueChanged<bool> onTypeMemoChanged;
+  final VoidCallback onOpenTypeMemo;
   final ValueChanged<double> onAutoVoiceKeyClickDelayChanged;
   final ValueChanged<double> onAutoVoiceKeyClickDurationChanged;
   final VoidCallback onOpenAccessibilitySettings;
@@ -1999,6 +2171,28 @@ class _SettingsSheetV2 extends StatelessWidget {
                 description: '开启后不依赖系统输入法键盘，使用内置 sherpa-onnx 离线模型识别语音。',
                 value: builtInVoiceInput,
                 onChanged: onBuiltInVoiceInputChanged,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Expanded(
+                    child: _SettingSwitch(
+                      title: 'Type memo',
+                      description: '保存手机端原始输入内容，支持按日期查看和正则搜索。',
+                      value: typeMemo,
+                      onChanged: onTypeMemoChanged,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 88,
+                    child: _VoiceButton(
+                      label: '查看',
+                      onPressed: onOpenTypeMemo,
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 12),
               _SettingSwitch(
@@ -2205,6 +2399,330 @@ class _SettingSwitch extends StatelessWidget {
             inactiveTrackColor: const Color(0x385B7062),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class TypeMemoPage extends StatefulWidget {
+  const TypeMemoPage({super.key});
+
+  @override
+  State<TypeMemoPage> createState() => _TypeMemoPageState();
+}
+
+class _TypeMemoPageState extends State<TypeMemoPage> {
+  final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+
+  List<String> _days = <String>[];
+  String? _selectedDay;
+  String _document = '';
+  List<RegExpMatch> _matches = <RegExpMatch>[];
+  int _currentMatch = 0;
+  String? _regexError;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _searchController.addListener(_runSearch);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final days = await TypeMemoStore.instance.loadDays();
+    var selectedDay = _selectedDay;
+    if (selectedDay != null && !days.contains(selectedDay)) {
+      selectedDay = null;
+    }
+    final document =
+        await TypeMemoStore.instance.loadDocument(day: selectedDay);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _days = days;
+      _selectedDay = selectedDay;
+      _document = document;
+      _loading = false;
+    });
+    _runSearch();
+  }
+
+  void _runSearch() {
+    final pattern = _searchController.text;
+    if (pattern.isEmpty) {
+      setState(() {
+        _matches = <RegExpMatch>[];
+        _currentMatch = 0;
+        _regexError = null;
+      });
+      return;
+    }
+    try {
+      final regex = RegExp(pattern, multiLine: true);
+      final matches = regex
+          .allMatches(_document)
+          .where((match) => match.end > match.start)
+          .toList();
+      setState(() {
+        _matches = matches;
+        _currentMatch =
+            matches.isEmpty ? 0 : _currentMatch.clamp(0, matches.length - 1);
+        _regexError = null;
+      });
+      _scrollToCurrentMatch();
+    } on FormatException catch (error) {
+      setState(() {
+        _matches = <RegExpMatch>[];
+        _currentMatch = 0;
+        _regexError = error.message;
+      });
+    }
+  }
+
+  void _moveMatch(int delta) {
+    if (_matches.isEmpty) {
+      return;
+    }
+    setState(() {
+      _currentMatch = (_currentMatch + delta) % _matches.length;
+      if (_currentMatch < 0) {
+        _currentMatch += _matches.length;
+      }
+    });
+    _scrollToCurrentMatch();
+  }
+
+  void _scrollToCurrentMatch() {
+    if (_matches.isEmpty ||
+        !_scrollController.hasClients ||
+        _document.isEmpty) {
+      return;
+    }
+    final start = _matches[_currentMatch].start;
+    final ratio = start / _document.length;
+    final target = _scrollController.position.maxScrollExtent * ratio;
+    _scrollController.animateTo(
+      target.clamp(0.0, _scrollController.position.maxScrollExtent),
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+    );
+  }
+
+  Future<void> _deleteSelectedDay() async {
+    final day = _selectedDay;
+    if (day == null) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除当天记录'),
+        content: Text('确定删除 $day 的 Type memo 吗？'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    await TypeMemoStore.instance.deleteDay(day);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _selectedDay = null);
+    await _load();
+  }
+
+  Future<void> _deleteAll() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除全部 Type memo'),
+        content: const Text('这会永久删除全部 Type memo 记录，且不可恢复。确定继续吗？'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('全部删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    await TypeMemoStore.instance.deleteAll();
+    if (!mounted) {
+      return;
+    }
+    setState(() => _selectedDay = null);
+    await _load();
+  }
+
+  TextSpan _buildHighlightedText() {
+    if (_matches.isEmpty) {
+      return TextSpan(text: _document);
+    }
+    final spans = <TextSpan>[];
+    var cursor = 0;
+    for (var i = 0; i < _matches.length; i += 1) {
+      final match = _matches[i];
+      if (match.start > cursor) {
+        spans.add(TextSpan(text: _document.substring(cursor, match.start)));
+      }
+      final current = i == _currentMatch;
+      spans.add(TextSpan(
+        text: _document.substring(match.start, match.end),
+        style: TextStyle(
+          color: current ? const Color(0xFF06100B) : const Color(0xFF050807),
+          backgroundColor:
+              current ? const Color(0xFF28F58D) : const Color(0xFFE6D56D),
+          fontWeight: FontWeight.w900,
+        ),
+      ));
+      cursor = match.end;
+    }
+    if (cursor < _document.length) {
+      spans.add(TextSpan(text: _document.substring(cursor)));
+    }
+    return TextSpan(children: spans);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final matchLabel = _matches.isEmpty
+        ? '0 / 0'
+        : '${_currentMatch + 1} / ${_matches.length}';
+    return Scaffold(
+      backgroundColor: const Color(0xFF050807),
+      appBar: AppBar(
+        title: const Text('Type memo'),
+        backgroundColor: const Color(0xFF050807),
+        foregroundColor: const Color(0xFFF0FFF5),
+        actions: <Widget>[
+          IconButton(
+            tooltip: '删除当天',
+            onPressed: _selectedDay == null ? null : _deleteSelectedDay,
+            icon: const Icon(Icons.delete_outline),
+          ),
+          IconButton(
+            tooltip: '全部删除',
+            onPressed: _deleteAll,
+            icon: const Icon(Icons.delete_forever),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: DropdownButtonFormField<String?>(
+                      initialValue: _selectedDay,
+                      dropdownColor: const Color(0xFF08100D),
+                      decoration: const InputDecoration(
+                        labelText: '范围',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: <DropdownMenuItem<String?>>[
+                        const DropdownMenuItem<String?>(
+                          value: null,
+                          child: Text('全部'),
+                        ),
+                        for (final day in _days)
+                          DropdownMenuItem<String?>(
+                            value: day,
+                            child: Text(day),
+                          ),
+                      ],
+                      onChanged: (value) async {
+                        setState(() => _selectedDay = value);
+                        await _load();
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    matchLabel,
+                    style: const TextStyle(
+                      color: Color(0xFF28F58D),
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: _matches.isEmpty ? null : () => _moveMatch(-1),
+                    icon: const Icon(Icons.keyboard_arrow_up),
+                  ),
+                  IconButton(
+                    onPressed: _matches.isEmpty ? null : () => _moveMatch(1),
+                    icon: const Icon(Icons.keyboard_arrow_down),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _searchController,
+                decoration: InputDecoration(
+                  labelText: '正则搜索',
+                  errorText: _regexError,
+                  prefixIcon: const Icon(Icons.search),
+                  border: const OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Expanded(
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xC706100B),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0x1F28F58D)),
+                  ),
+                  child: _loading
+                      ? const Center(child: CircularProgressIndicator())
+                      : SingleChildScrollView(
+                          controller: _scrollController,
+                          child: SelectableText.rich(
+                            _buildHighlightedText(),
+                            style: const TextStyle(
+                              color: Color(0xFFDDE7DF),
+                              fontSize: 14,
+                              height: 1.55,
+                              fontFamily: 'monospace',
+                            ),
+                          ),
+                        ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
