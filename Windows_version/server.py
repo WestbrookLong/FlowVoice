@@ -555,6 +555,7 @@ def create_app(
         log(f"[ws] connected: {peer}")
         await ws.send_json({"type": "ready"})
         input_gate_blocked = False
+        paused_raw_text: str | None = None
 
         async for msg in ws:
             if msg.type != web.WSMsgType.TEXT:
@@ -573,6 +574,10 @@ def create_app(
                         if text_agent_route_active:
                             text_agent_route_active = False
                         session.reset()
+                    if message_type == "sync_state":
+                        text = payload.get("text")
+                        if isinstance(text, str):
+                            paused_raw_text = text
                     input_gate_blocked = True
                     await ws.send_json({"type": "ack", "seq": payload.get("seq")})
                     continue
@@ -590,8 +595,14 @@ def create_app(
                         if text_agent is not None:
                             text_agent.reset_capture_baseline(text)
                         session.reset()
+                        paused_baseline = paused_raw_text if paused_raw_text is not None else text
+                        if text.startswith(paused_baseline):
+                            session.raw_session_start = len(paused_baseline)
+                        else:
+                            session.raw_session_start = len(text)
                         session.raw_text = trim_raw_text(text, session)
-                        session.raw_session_start = len(session.raw_text)
+                        paused_raw_text = None
+                        session.sync_state(text, settings)
                     elif text_agent is not None and text_agent.should_capture_text():
                         text_agent_route_active = True
                         active_source_text = text_agent.capture_active_source(text)

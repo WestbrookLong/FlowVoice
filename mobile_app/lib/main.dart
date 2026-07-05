@@ -213,6 +213,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   bool _builtInVoiceInput = false;
   bool _autoVoiceKeyClick = false;
   bool _typeMemo = false;
+  bool _secureWebSocket = false;
   double _autoVoiceKeyClickDelayMs = 500;
   double _autoVoiceKeyClickDurationMs = 500;
   String _lastTypeMemoText = '';
@@ -670,6 +671,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       return null;
     }
 
+    final secureFromText =
+        hostText.startsWith('https://') || hostText.startsWith('wss://');
     final normalized = hostText
         .replaceFirst(RegExp(r'^https?://'), '')
         .replaceFirst(RegExp(r'^wss?://'), '')
@@ -677,10 +680,12 @@ class _FlowVoicePageState extends State<FlowVoicePage>
         .first;
     final parts = normalized.split(':');
     final host = parts.first;
-    final port = parts.length > 1 ? int.tryParse(parts.last) ?? 8787 : 8787;
+    final secure = _secureWebSocket || secureFromText;
+    final port =
+        parts.length > 1 ? int.tryParse(parts.last) : (secure ? null : 8787);
 
     return Uri(
-      scheme: 'ws',
+      scheme: secure ? 'wss' : 'ws',
       host: host,
       port: port,
       path: '/ws',
@@ -716,8 +721,8 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       return;
     }
 
-    final port = uri.hasPort ? uri.port : 8787;
-    _hostController.text = '${uri.host}:$port';
+    _secureWebSocket = uri.scheme == 'https' || uri.scheme == 'wss';
+    _hostController.text = uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
     final token = uri.queryParameters['token'];
     if (token != null && token.isNotEmpty) {
       _tokenController.text = token;

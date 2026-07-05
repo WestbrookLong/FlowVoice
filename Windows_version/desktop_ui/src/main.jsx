@@ -11,6 +11,13 @@ const fallbackState = {
   port: "8787",
   url: "",
   status: "SERVICE STOPPED",
+  connectionMode: "local",
+  publicConnection: {
+    running: false,
+    status: "stopped",
+    url: "",
+    error: null,
+  },
   inputGate: {
     paused: false,
     label: "Alt+M",
@@ -38,6 +45,7 @@ function FlowVoiceDesktopConsole() {
   const [state, setState] = React.useState(fallbackState);
   const [message, setMessage] = React.useState("");
   const [typingStatsOpen, setTypingStatsOpen] = React.useState(false);
+  const [capturingHotkey, setCapturingHotkey] = React.useState(false);
   const refreshInFlight = React.useRef(false);
 
   const ip = state.ip;
@@ -47,6 +55,8 @@ function FlowVoiceDesktopConsole() {
   const inputGate = state.inputGate || fallbackState.inputGate;
   const inputGateHotkey = state.inputGateHotkey || fallbackState.inputGateHotkey;
   const typingStats = state.typingStats || fallbackState.typingStats;
+  const publicConnection = state.publicConnection || fallbackState.publicConnection;
+  const connectionMode = state.connectionMode || "local";
 
   const refresh = React.useCallback(async () => {
     const api = desktopApi();
@@ -92,6 +102,41 @@ function FlowVoiceDesktopConsole() {
       window.removeEventListener("pywebviewready", ready);
     };
   }, [refresh]);
+
+  React.useEffect(() => {
+    if (!capturingHotkey) {
+      return undefined;
+    }
+    const handleKeyDown = async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        setCapturingHotkey(false);
+        setMessage("Hotkey capture cancelled.");
+        return;
+      }
+      const modifierOnly = ["Control", "Alt", "Shift", "Meta"].includes(event.key);
+      if (modifierOnly) {
+        return;
+      }
+      const hasModifier = event.ctrlKey || event.altKey || event.shiftKey || event.metaKey;
+      if (!hasModifier) {
+        setMessage("Please include Ctrl, Alt, Shift, or Win.");
+        return;
+      }
+      setCapturingHotkey(false);
+      await callApi("set_input_gate_hotkey", {
+        key: event.key,
+        code: event.code,
+        ctrlKey: event.ctrlKey,
+        altKey: event.altKey,
+        shiftKey: event.shiftKey,
+        metaKey: event.metaKey,
+      });
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [capturingHotkey]);
 
   async function callApi(action, payload) {
     const api = desktopApi();
@@ -164,8 +209,12 @@ function FlowVoiceDesktopConsole() {
                   </p>
                 </div>
                 <div className="hidden rounded-2xl border border-[#21462F] bg-[#06100B] px-4 py-3 text-right lg:block">
-                  <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-[#5B7062]">Local</div>
-                  <div className="mt-1 font-mono text-sm font-semibold text-[#B9FFD4]">{ip}:{port}</div>
+                  <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-[#5B7062]">
+                    {connectionMode === "public" ? "Public" : "Local"}
+                  </div>
+                  <div className="mt-1 max-w-[210px] truncate font-mono text-sm font-semibold text-[#B9FFD4]">
+                    {connectionMode === "public" && publicConnection.url ? publicConnection.url.replace(/^https?:\/\//, "") : `${ip}:${port}`}
+                  </div>
                 </div>
               </div>
 
@@ -180,6 +229,19 @@ function FlowVoiceDesktopConsole() {
                   <div className="rounded-2xl border border-[#21462F] bg-[#06100B] p-4">
                     <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-[#5B7062]">Bound Session</div>
                     <code className="block truncate font-mono text-sm text-[#B9FFD4]">{token}</code>
+                    <div className="mt-3 rounded-xl border border-[#193324] bg-[#050C08]/80 px-3 py-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[#5B7062]">
+                          {connectionMode === "public" ? "Public Tunnel" : "Local Network"}
+                        </span>
+                        <span className={`h-2 w-2 rounded-full ${connectionMode === "public" && publicConnection.running ? "bg-[#28F58D] shadow-[0_0_12px_rgba(40,245,141,0.8)]" : "bg-[#5B7062]"}`} />
+                      </div>
+                      <div className="mt-1 truncate font-mono text-xs text-[#7FA98E]">
+                        {connectionMode === "public"
+                          ? publicConnection.url || publicConnection.status || publicConnection.error || "starting"
+                          : `${ip}:${port}`}
+                      </div>
+                    </div>
                     <div className="mt-4 h-px bg-[#193324]" />
                     <div className="mt-4 grid grid-cols-2 gap-3">
                       {state.running ? (
@@ -194,11 +256,20 @@ function FlowVoiceDesktopConsole() {
                       <button onClick={() => callApi("refresh_connection")} className="rounded-xl border border-[#2E7447] bg-[#10291B] py-3 text-sm font-semibold text-[#B9FFD4] transition hover:bg-[#163A26]">
                         Refresh
                       </button>
+                      {connectionMode === "public" && publicConnection.running ? (
+                        <button onClick={() => callApi("stop_public_service")} className="rounded-xl border border-[#6A5A20] bg-[#211C0B] py-3 text-sm font-semibold text-[#D7C47A] transition hover:bg-[#2A230D]">
+                          Stop Public
+                        </button>
+                      ) : (
+                        <button onClick={() => callApi("start_public_service")} className="rounded-xl border border-[#2E7447] bg-[#10291B] py-3 text-sm font-semibold text-[#B9FFD4] transition hover:bg-[#163A26]">
+                          Public Connect
+                        </button>
+                      )}
                     </div>
                   </div>
 
                   <div className="rounded-2xl border border-[#193324] bg-[#050C08]/70 px-4 py-3 text-xs leading-5 text-[#7FA98E]">
-                    Token included in the QR code. Refresh restarts the desktop endpoint when the phone changes network or needs to reconnect.
+                    Token included in the QR code. Public Connect uses Cloudflare Tunnel so the phone does not need to share the same Wi-Fi.
                   </div>
                 </div>
               </div>
@@ -227,9 +298,16 @@ function FlowVoiceDesktopConsole() {
               </div>
             </button>
 
-            <button
-              type="button"
+            <div
+              role="button"
+              tabIndex={0}
               onClick={() => callApi("toggle_input_pause")}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  callApi("toggle_input_pause");
+                }
+              }}
               className={`rounded-[26px] border p-6 text-left shadow-[0_26px_80px_rgba(0,0,0,0.5)] backdrop-blur-xl transition ${
                 inputGate.paused
                   ? "border-[#6A5A20] bg-[#211C0B]/90 hover:bg-[#2A230D]"
@@ -244,9 +322,31 @@ function FlowVoiceDesktopConsole() {
                   </h2>
                   <p className="mt-1 text-sm text-[#7FA98E]">Hotkey {inputGateHotkey.label || inputGate.label}</p>
                 </div>
-                <span className={`h-4 w-4 rounded-full ${inputGate.paused ? "bg-[#D7C47A] shadow-[0_0_18px_rgba(215,196,122,0.75)]" : "bg-[#28F58D] shadow-[0_0_18px_rgba(40,245,141,0.75)]"}`} />
+                <div className="flex items-center gap-3">
+                  <span className={`h-4 w-4 rounded-full ${inputGate.paused ? "bg-[#D7C47A] shadow-[0_0_18px_rgba(215,196,122,0.75)]" : "bg-[#28F58D] shadow-[0_0_18px_rgba(40,245,141,0.75)]"}`} />
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setCapturingHotkey(true);
+                      setMessage("Press the new hotkey. Press Esc to cancel.");
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setCapturingHotkey(true);
+                        setMessage("Press the new hotkey. Press Esc to cancel.");
+                      }
+                    }}
+                    className="rounded-xl border border-[#2E7447] bg-[#10291B] px-3 py-2 text-xs font-semibold text-[#B9FFD4] transition hover:bg-[#163A26]"
+                  >
+                    Change
+                  </span>
+                </div>
               </div>
-            </button>
+            </div>
 
             <div className="mt-auto rounded-[26px] border border-[#2F2A17] bg-[#161308]/75 px-5 py-4 text-sm leading-6 text-[#D7C47A]">
               To control elevated windows, run the client with administrator privileges.
@@ -260,8 +360,31 @@ function FlowVoiceDesktopConsole() {
           onClose={() => setTypingStatsOpen(false)}
         />
       )}
+      {capturingHotkey && <HotkeyCaptureOverlay onCancel={() => setCapturingHotkey(false)} />}
       </div>
     </div>
+  );
+}
+
+function HotkeyCaptureOverlay({ onCancel }) {
+  return createPortal(
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-[#020503]/78 backdrop-blur-sm">
+      <div className="w-[min(460px,calc(100vw-48px))] rounded-[26px] border border-[#2E7447] bg-[#08100D] p-7 text-center shadow-[0_30px_90px_rgba(0,0,0,0.62)]">
+        <div className="font-mono text-[11px] uppercase tracking-[0.3em] text-[#74E7A5]/70">Input Gate Hotkey</div>
+        <h2 className="mt-3 text-2xl font-semibold text-[#F2FFF7]">请按下快捷键</h2>
+        <p className="mt-3 text-sm leading-6 text-[#8EA99A]">
+          需要包含 Ctrl、Alt、Shift 或 Win。若快捷键已被系统占用，会自动保留原设置。
+        </p>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="mt-6 rounded-xl border border-[#285C3B] bg-[#0C1E14] px-5 py-3 text-sm font-semibold text-[#A8F7C4] transition hover:bg-[#12301F]"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

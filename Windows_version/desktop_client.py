@@ -1,13 +1,17 @@
 import asyncio
 import ctypes
 from ctypes import wintypes
+import json
 import os
 import queue
+import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
 import traceback
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -43,6 +47,32 @@ DESKTOP_VOICE_DEFAULT_CONFIG = {
     "hotwords": "",
 }
 VALID_DESKTOP_VOICE_ENGINES = {"vosk", "funasr", "baidu"}
+INPUT_GATE_HOTKEY_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "input_gate_hotkey.json"
+CLOUDFLARED_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "cloudflared.exe"
+CLOUDFLARED_DOWNLOAD_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+CLOUDFLARE_TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+DEFAULT_INPUT_GATE_HOTKEY = {
+    "virtual_key": 0x4D,
+    "modifiers": 0x0001,
+    "label": "Alt+M",
+}
+VK_NAME_TO_CODE = {
+    "BACKSPACE": 0x08,
+    "TAB": 0x09,
+    "ENTER": 0x0D,
+    "ESCAPE": 0x1B,
+    "SPACE": 0x20,
+    "PAGEUP": 0x21,
+    "PAGEDOWN": 0x22,
+    "END": 0x23,
+    "HOME": 0x24,
+    "ARROWLEFT": 0x25,
+    "ARROWUP": 0x26,
+    "ARROWRIGHT": 0x27,
+    "ARROWDOWN": 0x28,
+    "INSERT": 0x2D,
+    "DELETE": 0x2E,
+}
 VALID_FUNASR_MODELS = {"iic/SenseVoiceSmall", "paraformer-zh"}
 VALID_FUNASR_MODES = {"offline", "streaming", "candidate_streaming"}
 VALID_SEMANTIC_RERANKERS = {"bert", "heuristic"}
@@ -133,6 +163,103 @@ def normalize_desktop_voice_config(value: dict | None) -> dict:
     config["voiceCommands"] = bool(source.get("voiceCommands", config["voiceCommands"]))
     config["hotwords"] = str(source.get("hotwords", config["hotwords"])).strip()
     return config
+
+
+def _hotkey_label(modifiers: int, virtual_key: int) -> str:
+    parts: list[str] = []
+    if modifiers & TextAgentHotkeyThread.MOD_CONTROL:
+        parts.append("Ctrl")
+    if modifiers & TextAgentHotkeyThread.MOD_ALT:
+        parts.append("Alt")
+    if modifiers & TextAgentHotkeyThread.MOD_SHIFT:
+        parts.append("Shift")
+    if modifiers & TextAgentHotkeyThread.MOD_WIN:
+        parts.append("Win")
+    key_label = chr(virtual_key) if 0x30 <= virtual_key <= 0x5A else None
+    if key_label is None:
+        reverse = {value: key for key, value in VK_NAME_TO_CODE.items()}
+        key_label = reverse.get(virtual_key, f"VK{virtual_key}")
+        key_label = {
+            "ESCAPE": "Esc",
+            "ARROWLEFT": "Left",
+            "ARROWUP": "Up",
+            "ARROWRIGHT": "Right",
+            "ARROWDOWN": "Down",
+            "PAGEUP": "PageUp",
+            "PAGEDOWN": "PageDown",
+        }.get(key_label, key_label.title())
+    parts.append(key_label)
+    return "+".join(parts)
+
+
+def _virtual_key_from_payload(payload: dict) -> int | None:
+    code = str(payload.get("code", "")).strip()
+    key = str(payload.get("key", "")).strip()
+    upper_key = key.upper()
+    if code.startswith("Key") and len(code) == 4:
+        return ord(code[-1].upper())
+    if code.startswith("Digit") and len(code) == 6:
+        return ord(code[-1])
+    if code.startswith("F") and code[1:].isdigit():
+        value = int(code[1:])
+        if 1 <= value <= 24:
+            return 0x6F + value
+    if upper_key in VK_NAME_TO_CODE:
+        return VK_NAME_TO_CODE[upper_key]
+    if len(key) == 1 and key.isalnum():
+        return ord(key.upper())
+    return None
+
+
+def normalize_input_gate_hotkey(payload: dict | None) -> dict:
+    source = payload if isinstance(payload, dict) else DEFAULT_INPUT_GATE_HOTKEY
+    if "virtual_key" in source and "modifiers" in source:
+        virtual_key = int(source.get("virtual_key", DEFAULT_INPUT_GATE_HOTKEY["virtual_key"]))
+        modifiers = int(source.get("modifiers", DEFAULT_INPUT_GATE_HOTKEY["modifiers"]))
+    else:
+        virtual_key = _virtual_key_from_payload(source)
+        modifiers = 0
+        if bool(source.get("ctrlKey", False)):
+            modifiers |= TextAgentHotkeyThread.MOD_CONTROL
+        if bool(source.get("altKey", False)):
+            modifiers |= TextAgentHotkeyThread.MOD_ALT
+        if bool(source.get("shiftKey", False)):
+            modifiers |= TextAgentHotkeyThread.MOD_SHIFT
+        if bool(source.get("metaKey", False)):
+            modifiers |= TextAgentHotkeyThread.MOD_WIN
+        if virtual_key is None:
+            raise ValueError("Unsupported hotkey key.")
+        if modifiers == 0:
+            raise ValueError("Please include Ctrl, Alt, Shift, or Win.")
+    modifiers &= (
+        TextAgentHotkeyThread.MOD_ALT
+        | TextAgentHotkeyThread.MOD_CONTROL
+        | TextAgentHotkeyThread.MOD_SHIFT
+        | TextAgentHotkeyThread.MOD_WIN
+    )
+    if modifiers == 0:
+        raise ValueError("Please include Ctrl, Alt, Shift, or Win.")
+    if virtual_key in {0x10, 0x11, 0x12, 0x5B, 0x5C}:
+        raise ValueError("Modifier-only hotkeys are not supported.")
+    return {
+        "virtual_key": virtual_key,
+        "modifiers": modifiers,
+        "label": _hotkey_label(modifiers, virtual_key),
+    }
+
+
+def load_input_gate_hotkey() -> dict:
+    try:
+        if INPUT_GATE_HOTKEY_PATH.exists():
+            return normalize_input_gate_hotkey(json.loads(INPUT_GATE_HOTKEY_PATH.read_text(encoding="utf-8")))
+    except Exception as exc:
+        log(f"[input-gate] failed to load hotkey config: {exc}")
+    return dict(DEFAULT_INPUT_GATE_HOTKEY)
+
+
+def save_input_gate_hotkey(config: dict) -> None:
+    INPUT_GATE_HOTKEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    INPUT_GATE_HOTKEY_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def bridge_settings_from_desktop_config(config: dict) -> BridgeSettings:
@@ -272,6 +399,9 @@ class BridgeServerThread(threading.Thread):
 class TextAgentHotkeyThread(threading.Thread):
     MOD_ALT = 0x0001
     MOD_CONTROL = 0x0002
+    MOD_SHIFT = 0x0004
+    MOD_WIN = 0x0008
+    MOD_NOREPEAT = 0x4000
     WM_HOTKEY = 0x0312
     WM_QUIT = 0x0012
 
@@ -288,7 +418,7 @@ class TextAgentHotkeyThread(threading.Thread):
         self.callback = callback
         self.hotkey_id = hotkey_id
         self.virtual_key = virtual_key
-        self.modifiers = self.MOD_CONTROL | self.MOD_ALT if modifiers is None else modifiers
+        self.modifiers = (self.MOD_CONTROL | self.MOD_ALT if modifiers is None else modifiers) | self.MOD_NOREPEAT
         self.label = label
         self.thread_id: int | None = None
         self.ready = threading.Event()
@@ -847,6 +977,146 @@ class DesktopVoiceThread(threading.Thread):
         self.set_status("LISTENING")
 
 
+class CloudflareTunnel:
+    _download_lock = threading.Lock()
+
+    def __init__(self, executable_path: Path = CLOUDFLARED_PATH) -> None:
+        self.executable_path = executable_path
+        self.process: subprocess.Popen | None = None
+        self.public_url = ""
+        self.error: str | None = None
+        self.status = "stopped"
+        self._ready = threading.Event()
+        self._reader_thread: threading.Thread | None = None
+        self._lock = threading.RLock()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            running = self.process is not None and self.process.poll() is None
+            return {
+                "running": running,
+                "status": self.status,
+                "url": self.public_url,
+                "error": self.error,
+            }
+
+    def ensure_binary(self) -> None:
+        with self._download_lock:
+            if self.executable_path.exists():
+                return
+            self.executable_path.parent.mkdir(parents=True, exist_ok=True)
+            reusable_path = self.executable_path.with_suffix(".download")
+            temp_path = self.executable_path.with_suffix(f".{os.getpid()}.{int(time.time() * 1000)}.download")
+            source_path = reusable_path
+            if not reusable_path.exists() or reusable_path.stat().st_size <= 0:
+                source_path = temp_path
+                log(f"[cloudflare] downloading cloudflared from {CLOUDFLARED_DOWNLOAD_URL}")
+                urllib.request.urlretrieve(CLOUDFLARED_DOWNLOAD_URL, source_path)
+            last_error: Exception | None = None
+            for _ in range(8):
+                if self.executable_path.exists():
+                    return
+                try:
+                    source_path.replace(self.executable_path)
+                    return
+                except OSError as exc:
+                    last_error = exc
+                    time.sleep(0.35)
+            if self.executable_path.exists():
+                return
+            raise RuntimeError(f"Failed to install cloudflared: {last_error}")
+
+    def start(self, port: str) -> str:
+        with self._lock:
+            if self.process is not None and self.process.poll() is None and self.public_url:
+                return self.public_url
+            self.stop()
+            self.error = None
+            self.public_url = ""
+            self.status = "downloading"
+
+        self.ensure_binary()
+
+        with self._lock:
+            self.status = "connecting"
+            self._ready.clear()
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            self.process = subprocess.Popen(
+                [
+                    str(self.executable_path),
+                    "tunnel",
+                    "--no-autoupdate",
+                    "--url",
+                    f"http://127.0.0.1:{port}",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
+            )
+            self._reader_thread = threading.Thread(target=self._read_output, daemon=True)
+            self._reader_thread.start()
+
+        if not self._ready.wait(timeout=30):
+            with self._lock:
+                if self.error is None:
+                    self.error = "Timed out waiting for Cloudflare Tunnel URL."
+                self.status = "error"
+            self.stop()
+            raise RuntimeError(self.error)
+
+        with self._lock:
+            if self.error:
+                raise RuntimeError(self.error)
+            return self.public_url
+
+    def _read_output(self) -> None:
+        process = self.process
+        if process is None or process.stdout is None:
+            return
+        try:
+            for line in process.stdout:
+                clean = line.strip()
+                if clean:
+                    log(f"[cloudflare] {clean}")
+                match = CLOUDFLARE_TUNNEL_URL_PATTERN.search(clean)
+                if match:
+                    with self._lock:
+                        self.public_url = match.group(0)
+                        self.status = "online"
+                    self._ready.set()
+            code = process.poll()
+            with self._lock:
+                if self.status != "stopped" and code not in (None, 0):
+                    self.error = f"cloudflared exited with code {code}"
+                    self.status = "error"
+            self._ready.set()
+        except Exception as exc:
+            with self._lock:
+                self.error = str(exc)
+                self.status = "error"
+            self._ready.set()
+
+    def stop(self) -> None:
+        process = self.process
+        self.process = None
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=4)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        with self._lock:
+            self.status = "stopped"
+            self.public_url = ""
+            self._ready.set()
+
+
 class DesktopApi:
     def __init__(self) -> None:
         self.lock = threading.RLock()
@@ -857,6 +1127,8 @@ class DesktopApi:
         self.server_thread: BridgeServerThread | None = None
         self.desktop_voice_thread: DesktopVoiceThread | None = None
         self.input_gate = InputGate()
+        self.cloudflare_tunnel = CloudflareTunnel()
+        self.connection_mode = "local"
         self.typing_stats = TypingStats(
             Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "typing_stats.json"
         )
@@ -869,6 +1141,7 @@ class DesktopApi:
         self.text_agent_style = "meeting_notes"
         self.text_agent_hotkey_thread: TextAgentHotkeyThread | None = None
         self.input_gate_hotkey_thread: TextAgentHotkeyThread | None = None
+        self.input_gate_hotkey_config = load_input_gate_hotkey()
         self.desktop_voice_config = normalize_desktop_voice_config(None)
         self.desktop_voice_settings = bridge_settings_from_desktop_config(self.desktop_voice_config)
         self.window: webview.Window | None = None
@@ -879,6 +1152,9 @@ class DesktopApi:
         self.maximized = False
 
     def _url(self) -> str:
+        tunnel = self.cloudflare_tunnel.snapshot()
+        if self.connection_mode == "public" and tunnel["url"]:
+            return f"{tunnel['url']}/?token={self.token}&v={self.page_version}"
         return f"http://{self.lan_ip}:{self.port}/?token={self.token}&v={self.page_version}"
 
     def _running(self) -> bool:
@@ -929,7 +1205,7 @@ class DesktopApi:
             "inputGateHotkey": {
                 "registered": self.input_gate_hotkey_thread is not None and self.input_gate_hotkey_thread.error is None,
                 "error": self.input_gate_hotkey_thread.error if self.input_gate_hotkey_thread is not None else None,
-                "label": "Alt+M",
+                "label": self.input_gate_hotkey_config["label"],
             },
         }
 
@@ -943,11 +1219,13 @@ class DesktopApi:
                 "port": self.port,
                 "url": self._url(),
                 "status": "SERVICE STARTED" if running else "SERVICE STOPPED",
+                "connectionMode": self.connection_mode,
+                "publicConnection": self.cloudflare_tunnel.snapshot(),
                 "inputGate": self.input_gate.snapshot(),
                 "inputGateHotkey": {
                     "registered": self.input_gate_hotkey_thread is not None and self.input_gate_hotkey_thread.error is None,
                     "error": self.input_gate_hotkey_thread.error if self.input_gate_hotkey_thread is not None else None,
-                    "label": "Alt+M",
+                    "label": self.input_gate_hotkey_config["label"],
                 },
                 "typingStats": self.typing_stats.snapshot(),
             }
@@ -991,6 +1269,8 @@ class DesktopApi:
 
     def start_service(self) -> dict:
         with self.lock:
+            self.connection_mode = "local"
+            self.cloudflare_tunnel.stop()
             thread, error = self._start_service_locked()
             if error:
                 return self._result(error)
@@ -1003,8 +1283,38 @@ class DesktopApi:
                 return self._result(f"Failed to start service: {thread.error}")
             return self._result("Service started.")
 
-    def stop_service(self) -> dict:
+    def start_public_service(self) -> dict:
         with self.lock:
+            self.connection_mode = "public"
+            thread, error = self._start_service_locked()
+            if error and error != "Service is already running.":
+                self.connection_mode = "local"
+                return self._result(error)
+            thread_to_wait = thread
+
+        if thread_to_wait is not None:
+            thread_to_wait.ready.wait(timeout=4)
+            with self.lock:
+                if thread_to_wait.error:
+                    self.server_thread = None
+                    self.connection_mode = "local"
+                    return self._result(f"Failed to start service: {thread_to_wait.error}")
+
+        try:
+            public_url = self.cloudflare_tunnel.start(self.port)
+        except Exception as exc:
+            with self.lock:
+                self.connection_mode = "local"
+            return self._result(f"Public connection failed: {exc}")
+
+        with self.lock:
+            self.page_version = str(int(time.time()))
+        return self._result(f"Public connection started: {public_url}")
+
+    def stop_service(self) -> dict:
+        self.cloudflare_tunnel.stop()
+        with self.lock:
+            self.connection_mode = "local"
             thread = self.server_thread
             self.server_thread = None
         if thread is not None:
@@ -1012,7 +1322,15 @@ class DesktopApi:
             thread.join(timeout=2)
         return self._result("Service stopped.")
 
+    def stop_public_service(self) -> dict:
+        self.cloudflare_tunnel.stop()
+        with self.lock:
+            self.connection_mode = "local"
+        return self._result("Public connection stopped. Local service is still available." if self._running() else "Public connection stopped.")
+
     def refresh_connection(self) -> dict:
+        was_public = self.connection_mode == "public"
+        self.cloudflare_tunnel.stop()
         with self.lock:
             thread = self.server_thread
             self.server_thread = None
@@ -1033,7 +1351,19 @@ class DesktopApi:
             if thread.error:
                 self.server_thread = None
                 return self._result(f"Failed to refresh connection: {thread.error}")
-            return self._result("Connection refreshed. Scan the updated QR code.")
+        if was_public:
+            with self.lock:
+                self.connection_mode = "public"
+            try:
+                self.cloudflare_tunnel.start(self.port)
+            except Exception as exc:
+                with self.lock:
+                    self.connection_mode = "local"
+                return self._result(f"Connection refreshed, but public tunnel failed: {exc}")
+            return self._result("Public connection refreshed. Scan the updated QR code.")
+        with self.lock:
+            self.connection_mode = "local"
+        return self._result("Connection refreshed. Scan the updated QR code.")
 
     def copy_url(self) -> dict:
         url = self.get_state()["url"]
@@ -1130,6 +1460,35 @@ class DesktopApi:
             self.window.show()
             self.window.restore()
         return self._result()
+
+    def set_input_gate_hotkey(self, payload: dict) -> dict:
+        try:
+            config = normalize_input_gate_hotkey(payload)
+        except Exception as exc:
+            return self._result(f"Invalid hotkey: {exc}")
+
+        previous_config = dict(self.input_gate_hotkey_config)
+        previous_thread = self.input_gate_hotkey_thread
+        if previous_thread is not None:
+            previous_thread.stop()
+            previous_thread.join(timeout=2)
+            self.input_gate_hotkey_thread = None
+
+        self.input_gate_hotkey_config = config
+        self.start_hotkeys()
+        thread = self.input_gate_hotkey_thread
+        if thread is None or thread.error is not None:
+            error = thread.error if thread is not None else "Hotkey registration failed."
+            if thread is not None:
+                thread.stop()
+                thread.join(timeout=2)
+            self.input_gate_hotkey_thread = None
+            self.input_gate_hotkey_config = previous_config
+            self.start_hotkeys()
+            return self._result(f"Hotkey unavailable: {error}")
+
+        save_input_gate_hotkey(config)
+        return self._result(f"Hotkey set to {config['label']}.")
 
     def toggle_input_pause(self) -> dict:
         paused = self.input_gate.toggle()
@@ -1322,18 +1681,20 @@ class DesktopApi:
             self.input_gate_hotkey_thread.stop()
             self.input_gate_hotkey_thread.join(timeout=2)
             self.input_gate_hotkey_thread = None
+        self.cloudflare_tunnel.stop()
         self.stop_desktop_voice()
         self.stop_service()
         self.typing_stats.close()
 
     def start_hotkeys(self) -> None:
         if self.input_gate_hotkey_thread is None:
+            hotkey = self.input_gate_hotkey_config
             thread = TextAgentHotkeyThread(
                 self.toggle_input_pause,
                 hotkey_id=0x4642,
-                virtual_key=0x4D,
-                modifiers=TextAgentHotkeyThread.MOD_ALT,
-                label="Alt+M",
+                virtual_key=hotkey["virtual_key"],
+                modifiers=hotkey["modifiers"],
+                label=hotkey["label"],
             )
             self.input_gate_hotkey_thread = thread
             thread.start()
