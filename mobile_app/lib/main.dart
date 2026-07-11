@@ -880,6 +880,21 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     _send(message);
   }
 
+  void _rebaseInputSettings() {
+    final message = <String, Object?>{
+      'type': 'rebase_settings',
+      'token': _tokenController.text.trim(),
+      'seq': ++_seq,
+      'text': _inputController.text,
+      'settings': _settingsPayload(),
+    };
+    _lastSnapshotKey = jsonEncode(<String, Object?>{
+      'text': message['text'],
+      'settings': message['settings'],
+    });
+    _send(message);
+  }
+
   void _insertPunctuation(String text) {
     _send(<String, Object?>{
       'type': 'insert_text',
@@ -986,11 +1001,16 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setSheetState) {
-            void update(VoidCallback fn) {
+            void update(
+              VoidCallback fn, {
+              bool rebaseInputSettings = false,
+            }) {
               setState(fn);
               setSheetState(() {});
               _savePrefs();
-              _syncInput(force: true);
+              if (rebaseInputSettings) {
+                _rebaseInputSettings();
+              }
               if (_pureBlackMode) {
                 _focusInputSoon(force: true);
               }
@@ -1014,18 +1034,25 @@ class _FlowVoicePageState extends State<FlowVoicePage>
                   typeMemo: _typeMemo,
                   autoVoiceKeyClickDelayMs: _autoVoiceKeyClickDelayMs,
                   autoVoiceKeyClickDurationMs: _autoVoiceKeyClickDurationMs,
-                  onFilterChanged: (value) => update(() {
-                    _filterPunctuation = value;
-                    if (!value) {
-                      _convertSpokenPunctuation = false;
-                    }
-                  }),
+                  onFilterChanged: (value) => update(
+                    () {
+                      _filterPunctuation = value;
+                      if (!value) {
+                        _convertSpokenPunctuation = false;
+                      }
+                    },
+                    rebaseInputSettings: true,
+                  ),
                   onConvertChanged: _filterPunctuation
-                      ? (value) =>
-                          update(() => _convertSpokenPunctuation = value)
+                      ? (value) => update(
+                            () => _convertSpokenPunctuation = value,
+                            rebaseInputSettings: true,
+                          )
                       : null,
-                  onCommandChanged: (value) =>
-                      update(() => _enableVoiceCommands = value),
+                  onCommandChanged: (value) => update(
+                    () => _enableVoiceCommands = value,
+                    rebaseInputSettings: true,
+                  ),
                   onPureBlackChanged: (value) =>
                       update(() => _pureBlackMode = value),
                   onPunctuationInsertChanged: (value) =>

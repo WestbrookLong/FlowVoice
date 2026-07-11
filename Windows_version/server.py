@@ -262,6 +262,12 @@ class FlowInputSession:
         self.raw_session_start = 0
         self.text_session.reset()
 
+    def rebase(self, raw_text: str) -> None:
+        self.raw_text = trim_raw_text(raw_text, self)
+        self.raw_session_start = len(self.raw_text)
+        self.text_session.reset()
+        log(f"[sync] rebase at {self.raw_session_start} raw chars")
+
     def sync_state(self, raw_text: str, settings: BridgeSettings) -> None:
         self.raw_text = trim_raw_text(raw_text, self)
         if self.raw_session_start > len(self.raw_text):
@@ -616,7 +622,15 @@ def create_app(
                 if resumed_from_input_gate:
                     input_gate_blocked = False
 
-                if message_type == "sync_state":
+                if message_type == "rebase_settings":
+                    text = payload.get("text")
+                    if not isinstance(text, str):
+                        raise ValueError("rebase_settings.text must be a string")
+                    BridgeSettings.from_payload(payload.get("settings"))
+                    if text_agent is not None:
+                        text_agent.observe_mobile_text(text)
+                    session.rebase(text)
+                elif message_type == "sync_state":
                     text = payload.get("text")
                     if not isinstance(text, str):
                         raise ValueError("sync_state.text must be a string")
