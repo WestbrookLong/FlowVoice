@@ -267,7 +267,7 @@ def load_input_gate_mode() -> str:
     try:
         if INPUT_GATE_MODE_PATH.exists():
             mode = json.loads(INPUT_GATE_MODE_PATH.read_text(encoding="utf-8")).get("mode")
-            if mode in {"pause", "voice_hold"}:
+            if mode in {"pause", "voice_hold", "tap_voice"}:
                 return mode
     except Exception as exc:
         log(f"[input-gate] failed to load mode: {exc}")
@@ -1277,6 +1277,7 @@ class DesktopApi:
         self.input_gate_hotkey_thread: TextAgentHotkeyThread | None = None
         self.input_gate_hotkey_config = load_input_gate_hotkey()
         self.input_gate_mode = load_input_gate_mode()
+        self.tap_voice_active = False
         self.desktop_voice_config = normalize_desktop_voice_config(None)
         self.desktop_voice_settings = bridge_settings_from_desktop_config(self.desktop_voice_config)
         self.window: webview.Window | None = None
@@ -1358,6 +1359,7 @@ class DesktopApi:
                 "publicConnection": self.cloudflare_tunnel.snapshot(),
                 "inputGate": self.input_gate.snapshot(),
                 "inputGateMode": self.input_gate_mode,
+                "tapVoiceActive": self.tap_voice_active,
                 "inputGateHotkey": {
                     "registered": self.input_gate_hotkey_thread is not None and self.input_gate_hotkey_thread.error is None,
                     "error": self.input_gate_hotkey_thread.error if self.input_gate_hotkey_thread is not None else None,
@@ -1449,6 +1451,7 @@ class DesktopApi:
 
     def stop_service(self) -> dict:
         self.cloudflare_tunnel.stop()
+        self._release_tap_voice()
         with self.lock:
             self.connection_mode = "local"
             thread = self.server_thread
@@ -1467,6 +1470,7 @@ class DesktopApi:
     def refresh_connection(self) -> dict:
         was_public = self.connection_mode == "public"
         self.cloudflare_tunnel.stop()
+        self._release_tap_voice()
         with self.lock:
             thread = self.server_thread
             self.server_thread = None
@@ -1603,6 +1607,7 @@ class DesktopApi:
         except Exception as exc:
             return self._result(f"Invalid hotkey: {exc}")
 
+        self._release_tap_voice()
         previous_config = dict(self.input_gate_hotkey_config)
         previous_thread = self.input_gate_hotkey_thread
         if previous_thread is not None:
@@ -1627,11 +1632,12 @@ class DesktopApi:
         return self._result(f"Hotkey set to {config['label']}.")
 
     def set_input_gate_mode(self, mode: str) -> dict:
-        if mode not in {"pause", "voice_hold"}:
+        if mode not in {"pause", "voice_hold", "tap_voice"}:
             return self._result("Invalid input gate mode.")
         if mode == self.input_gate_mode:
             return self._result()
         self._stop_input_gate_hotkey()
+        self._release_tap_voice()
         self._send_voice_hold(False)
         self.input_gate_mode = mode
         save_input_gate_mode(mode)
@@ -1643,6 +1649,20 @@ class DesktopApi:
         if thread is None:
             return False
         return thread.send_phone_control("voice_hold_start" if pressed else "voice_hold_stop")
+
+    def toggle_tap_voice(self) -> dict:
+        if self.tap_voice_active:
+            self._send_voice_hold(False)
+            self.tap_voice_active = False
+            return self._result("Tap Voice released.")
+        started = self._send_voice_hold(True)
+        self.tap_voice_active = started
+        return self._result("Tap Voice active." if started else "No phone is connected.")
+
+    def _release_tap_voice(self) -> None:
+        if self.tap_voice_active:
+            self._send_voice_hold(False)
+            self.tap_voice_active = False
 
     def _stop_input_gate_hotkey(self) -> None:
         thread = self.input_gate_hotkey_thread
@@ -1810,6 +1830,7 @@ class DesktopApi:
         return state
 
     def shutdown(self) -> None:
+        self._release_tap_voice()
         if self.agent_window is not None:
             try:
                 agent_window = self.agent_window
@@ -1858,7 +1879,7 @@ class DesktopApi:
                 )
             else:
                 thread = TextAgentHotkeyThread(
-                    self.toggle_input_pause,
+                    self.toggle_tap_voice if self.input_gate_mode == "tap_voice" else self.toggle_input_pause,
                     hotkey_id=0x4642,
                     virtual_key=hotkey["virtual_key"],
                     modifiers=hotkey["modifiers"],
