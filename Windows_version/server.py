@@ -53,6 +53,33 @@ USER32 = ctypes.WinDLL("user32", use_last_error=True)
 
 MAX_SYNC_TEXT_LEN = 5000
 MAX_RAW_TEXT_LEN = 50000
+
+
+class PhoneControlHub:
+    def __init__(self) -> None:
+        self.connections: set[web.WebSocketResponse] = set()
+
+    def attach(self, ws: web.WebSocketResponse) -> None:
+        self.connections.add(ws)
+
+    def detach(self, ws: web.WebSocketResponse) -> None:
+        self.connections.discard(ws)
+
+    async def broadcast(self, payload: dict[str, Any]) -> int:
+        sent = 0
+        stale: list[web.WebSocketResponse] = []
+        for ws in tuple(self.connections):
+            if ws.closed:
+                stale.append(ws)
+                continue
+            try:
+                await ws.send_json(payload)
+                sent += 1
+            except Exception:
+                stale.append(ws)
+        for ws in stale:
+            self.connections.discard(ws)
+        return sent
 MAX_DELETE_ALL_BACKSPACES = 5000
 BOUNDARY_PUNCTUATION = ",.;:!?，。！？、；："
 BOUNDARY_PUNCTUATION_SET = set(BOUNDARY_PUNCTUATION)
@@ -499,6 +526,7 @@ def create_app(
     text_agent: Any = None,
     typing_stats: Any = None,
     input_gate: Any = None,
+    phone_control: PhoneControlHub | None = None,
 ) -> web.Application:
     app = web.Application()
     session = FlowInputSession(
@@ -553,6 +581,8 @@ def create_app(
         await ws.prepare(request)
         peer = request.remote or "unknown"
         log(f"[ws] connected: {peer}")
+        if phone_control is not None:
+            phone_control.attach(ws)
         await ws.send_json({"type": "ready"})
         input_gate_blocked = False
         paused_raw_text: str | None = None
@@ -669,6 +699,8 @@ def create_app(
                 log(f"[error] {exc}")
                 await ws.send_json({"type": "error", "message": str(exc)})
 
+        if phone_control is not None:
+            phone_control.detach(ws)
         log(f"[ws] disconnected: {peer}")
         return ws
 

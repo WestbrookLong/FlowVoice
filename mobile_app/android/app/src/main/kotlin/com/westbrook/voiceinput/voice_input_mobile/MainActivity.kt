@@ -48,6 +48,13 @@ class MainActivity : FlutterActivity() {
                     startService(intent)
                     result.success(true)
                 }
+                "startVoiceHold" -> {
+                    result.success(VoiceKeyClickAccessibilityService.startHold(applicationContext))
+                }
+                "stopVoiceHold" -> {
+                    VoiceKeyClickAccessibilityService.stopHold()
+                    result.success(null)
+                }
                 "startBuiltInVoice" -> {
                     BuiltInVoiceEngine.start(
                         context = applicationContext,

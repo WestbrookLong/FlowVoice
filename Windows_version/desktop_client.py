@@ -28,7 +28,7 @@ from asr.funasr_streaming_engine import DEFAULT_STREAMING_MODEL, FunASRStreaming
 from asr.punctuation import PunctuationEngine
 from asr.vosk_engine import VoskEngine
 from input_gate import InputGate
-from server import BridgeSettings, FlowInputSession, create_app, get_lan_ip, log, render_text, send_backspace_chunks, type_text
+from server import BridgeSettings, FlowInputSession, PhoneControlHub, create_app, get_lan_ip, log, render_text, send_backspace_chunks, type_text
 from text_agent import TextAgentManager
 from typing_stats import TypingStats
 
@@ -48,6 +48,7 @@ DESKTOP_VOICE_DEFAULT_CONFIG = {
 }
 VALID_DESKTOP_VOICE_ENGINES = {"vosk", "funasr", "baidu"}
 INPUT_GATE_HOTKEY_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "input_gate_hotkey.json"
+INPUT_GATE_MODE_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "input_gate_mode.json"
 CLOUDFLARED_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "cloudflared.exe"
 CLOUDFLARED_DOWNLOAD_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
 CLOUDFLARE_TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
@@ -262,6 +263,22 @@ def save_input_gate_hotkey(config: dict) -> None:
     INPUT_GATE_HOTKEY_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_input_gate_mode() -> str:
+    try:
+        if INPUT_GATE_MODE_PATH.exists():
+            mode = json.loads(INPUT_GATE_MODE_PATH.read_text(encoding="utf-8")).get("mode")
+            if mode in {"pause", "voice_hold"}:
+                return mode
+    except Exception as exc:
+        log(f"[input-gate] failed to load mode: {exc}")
+    return "pause"
+
+
+def save_input_gate_mode(mode: str) -> None:
+    INPUT_GATE_MODE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    INPUT_GATE_MODE_PATH.write_text(json.dumps({"mode": mode}, indent=2), encoding="utf-8")
+
+
 def bridge_settings_from_desktop_config(config: dict) -> BridgeSettings:
     use_spoken_punctuation = config.get("punctuationStrategy") == "spoken"
     return BridgeSettings(
@@ -360,6 +377,7 @@ class BridgeServerThread(threading.Thread):
         self.runner: web.AppRunner | None = None
         self.ready = threading.Event()
         self.error: str | None = None
+        self.phone_control = PhoneControlHub()
 
     def run(self) -> None:
         self.loop = asyncio.new_event_loop()
@@ -381,6 +399,7 @@ class BridgeServerThread(threading.Thread):
             text_agent=self.text_agent,
             typing_stats=self.typing_stats,
             input_gate=self.input_gate,
+            phone_control=self.phone_control,
         )
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
@@ -394,6 +413,19 @@ class BridgeServerThread(threading.Thread):
     def stop(self) -> None:
         if self.loop is not None:
             self.loop.call_soon_threadsafe(self.loop.stop)
+
+    def send_phone_control(self, message_type: str) -> bool:
+        if self.loop is None or not self.loop.is_running():
+            return False
+        future = asyncio.run_coroutine_threadsafe(
+            self.phone_control.broadcast({"type": message_type}),
+            self.loop,
+        )
+        try:
+            return future.result(timeout=1) > 0
+        except Exception as exc:
+            log(f"[phone-control] send failed: {exc}")
+            return False
 
 
 class TextAgentHotkeyThread(threading.Thread):
@@ -451,6 +483,108 @@ class TextAgentHotkeyThread(threading.Thread):
         if self.thread_id is not None:
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             user32.PostThreadMessageW(self.thread_id, self.WM_QUIT, 0, 0)
+
+
+class HoldHotkeyThread(threading.Thread):
+    WH_KEYBOARD_LL = 13
+    WM_KEYDOWN = 0x0100
+    WM_KEYUP = 0x0101
+    WM_SYSKEYDOWN = 0x0104
+    WM_SYSKEYUP = 0x0105
+    WM_QUIT = 0x0012
+
+    def __init__(self, on_press, on_release, *, virtual_key: int, modifiers: int, label: str) -> None:
+        super().__init__(daemon=True)
+        self.on_press = on_press
+        self.on_release = on_release
+        self.virtual_key = virtual_key
+        self.modifiers = modifiers
+        self.label = label
+        self.thread_id: int | None = None
+        self.ready = threading.Event()
+        self.error: str | None = None
+        self.stop_event = threading.Event()
+        self.pressed = False
+        self._hook = None
+        self._callback = None
+
+    def _modifiers_down(self, user32) -> bool:
+        checks = (
+            (TextAgentHotkeyThread.MOD_ALT, 0x12),
+            (TextAgentHotkeyThread.MOD_CONTROL, 0x11),
+            (TextAgentHotkeyThread.MOD_SHIFT, 0x10),
+            (TextAgentHotkeyThread.MOD_WIN, 0x5B),
+        )
+        return all(
+            not (self.modifiers & flag) or bool(user32.GetAsyncKeyState(vk) & 0x8000)
+            for flag, vk in checks
+        )
+
+    def run(self) -> None:
+        if sys.platform != "win32":
+            self.error = "Global hotkeys are only supported on Windows."
+            self.ready.set()
+            return
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32.SetWindowsHookExW.argtypes = (ctypes.c_int, ctypes.c_void_p, wintypes.HINSTANCE, wintypes.DWORD)
+        user32.SetWindowsHookExW.restype = wintypes.HHOOK
+        user32.CallNextHookEx.argtypes = (wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+        user32.CallNextHookEx.restype = ctypes.c_long
+        user32.UnhookWindowsHookEx.argtypes = (wintypes.HHOOK,)
+        user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+        kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        self.thread_id = kernel32.GetCurrentThreadId()
+        callback_type = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+        def hook_proc(code, w_param, l_param):
+            if code >= 0:
+                vk_code = ctypes.cast(l_param, ctypes.POINTER(ctypes.c_uint))[0]
+                if vk_code == self.virtual_key:
+                    if w_param in (self.WM_KEYDOWN, self.WM_SYSKEYDOWN) and self._modifiers_down(user32):
+                        if not self.pressed:
+                            self.pressed = True
+                            self.on_press()
+                        return 1
+                    if w_param in (self.WM_KEYUP, self.WM_SYSKEYUP) and self.pressed:
+                        self.pressed = False
+                        self.on_release()
+                        return 1
+            return user32.CallNextHookEx(self._hook, code, w_param, l_param)
+
+        self._callback = callback_type(hook_proc)
+        self._hook = user32.SetWindowsHookExW(
+            self.WH_KEYBOARD_LL,
+            self._callback,
+            kernel32.GetModuleHandleW(None),
+            0,
+        )
+        if not self._hook:
+            self.error = f"SetWindowsHookEx failed: {ctypes.get_last_error()}"
+            self.ready.set()
+            return
+        self.ready.set()
+        msg = wintypes.MSG()
+        try:
+            while not self.stop_event.is_set() and user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+        finally:
+            if self.pressed:
+                self.on_release()
+                self.pressed = False
+            user32.UnhookWindowsHookEx(self._hook)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread_id is not None:
+            ctypes.WinDLL("user32", use_last_error=True).PostThreadMessageW(
+                self.thread_id,
+                self.WM_QUIT,
+                0,
+                0,
+            )
 
 
 class DesktopVoiceThread(threading.Thread):
@@ -1142,6 +1276,7 @@ class DesktopApi:
         self.text_agent_hotkey_thread: TextAgentHotkeyThread | None = None
         self.input_gate_hotkey_thread: TextAgentHotkeyThread | None = None
         self.input_gate_hotkey_config = load_input_gate_hotkey()
+        self.input_gate_mode = load_input_gate_mode()
         self.desktop_voice_config = normalize_desktop_voice_config(None)
         self.desktop_voice_settings = bridge_settings_from_desktop_config(self.desktop_voice_config)
         self.window: webview.Window | None = None
@@ -1222,6 +1357,7 @@ class DesktopApi:
                 "connectionMode": self.connection_mode,
                 "publicConnection": self.cloudflare_tunnel.snapshot(),
                 "inputGate": self.input_gate.snapshot(),
+                "inputGateMode": self.input_gate_mode,
                 "inputGateHotkey": {
                     "registered": self.input_gate_hotkey_thread is not None and self.input_gate_hotkey_thread.error is None,
                     "error": self.input_gate_hotkey_thread.error if self.input_gate_hotkey_thread is not None else None,
@@ -1490,6 +1626,31 @@ class DesktopApi:
         save_input_gate_hotkey(config)
         return self._result(f"Hotkey set to {config['label']}.")
 
+    def set_input_gate_mode(self, mode: str) -> dict:
+        if mode not in {"pause", "voice_hold"}:
+            return self._result("Invalid input gate mode.")
+        if mode == self.input_gate_mode:
+            return self._result()
+        self._stop_input_gate_hotkey()
+        self._send_voice_hold(False)
+        self.input_gate_mode = mode
+        save_input_gate_mode(mode)
+        self.start_hotkeys()
+        return self._result("Input gate mode updated.")
+
+    def _send_voice_hold(self, pressed: bool) -> bool:
+        thread = self.server_thread
+        if thread is None:
+            return False
+        return thread.send_phone_control("voice_hold_start" if pressed else "voice_hold_stop")
+
+    def _stop_input_gate_hotkey(self) -> None:
+        thread = self.input_gate_hotkey_thread
+        if thread is not None:
+            thread.stop()
+            thread.join(timeout=2)
+            self.input_gate_hotkey_thread = None
+
     def toggle_input_pause(self) -> dict:
         paused = self.input_gate.toggle()
         if not paused:
@@ -1678,9 +1839,7 @@ class DesktopApi:
             self.text_agent_hotkey_thread.join(timeout=2)
             self.text_agent_hotkey_thread = None
         if self.input_gate_hotkey_thread is not None:
-            self.input_gate_hotkey_thread.stop()
-            self.input_gate_hotkey_thread.join(timeout=2)
-            self.input_gate_hotkey_thread = None
+            self._stop_input_gate_hotkey()
         self.cloudflare_tunnel.stop()
         self.stop_desktop_voice()
         self.stop_service()
@@ -1689,13 +1848,22 @@ class DesktopApi:
     def start_hotkeys(self) -> None:
         if self.input_gate_hotkey_thread is None:
             hotkey = self.input_gate_hotkey_config
-            thread = TextAgentHotkeyThread(
-                self.toggle_input_pause,
-                hotkey_id=0x4642,
-                virtual_key=hotkey["virtual_key"],
-                modifiers=hotkey["modifiers"],
-                label=hotkey["label"],
-            )
+            if self.input_gate_mode == "voice_hold":
+                thread = HoldHotkeyThread(
+                    lambda: self._send_voice_hold(True),
+                    lambda: self._send_voice_hold(False),
+                    virtual_key=hotkey["virtual_key"],
+                    modifiers=hotkey["modifiers"],
+                    label=hotkey["label"],
+                )
+            else:
+                thread = TextAgentHotkeyThread(
+                    self.toggle_input_pause,
+                    hotkey_id=0x4642,
+                    virtual_key=hotkey["virtual_key"],
+                    modifiers=hotkey["modifiers"],
+                    label=hotkey["label"],
+                )
             self.input_gate_hotkey_thread = thread
             thread.start()
             thread.ready.wait(timeout=2)

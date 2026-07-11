@@ -487,6 +487,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       'voice_click_point_missing' => '请先校准语音键点击位置。',
       'voice_click_point_invalid' => '语音键点击位置无效，请重新校准。',
       'voice_click_dispatch_failed' => '自动点击失败，请检查无障碍权限。',
+      'voice_hold_requires_android_8' => '长按语音需要 Android 8.0 或更高版本。',
       _ => message,
     };
     if (!mounted) {
@@ -780,12 +781,43 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     }
     try {
       final message = jsonDecode(data);
-      if (message is Map && message['type'] == 'error') {
-        _setStatus(BridgeStatus.error, '电脑错误');
+      if (message is Map) {
+        final type = message['type'];
+        if (type == 'error') {
+          _setStatus(BridgeStatus.error, '电脑错误');
+        } else if (type == 'voice_hold_start') {
+          _startRemoteVoiceHold();
+        } else if (type == 'voice_hold_stop') {
+          _stopRemoteVoiceHold();
+        }
       }
     } catch (_) {
       // Ignore diagnostics that are not JSON.
     }
+  }
+
+  Future<void> _startRemoteVoiceHold() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      final result =
+          await _overlayChannel.invokeMethod<String>('startVoiceHold');
+      if (result != null && result != 'ok') {
+        _showOverlayDiagnostic(result);
+      }
+    } catch (_) {
+      _showOverlayDiagnostic('voice_click_dispatch_failed');
+    }
+  }
+
+  Future<void> _stopRemoteVoiceHold() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      await _overlayChannel.invokeMethod<void>('stopVoiceHold');
+    } catch (_) {}
   }
 
   void _handleSocketClosed(WebSocket socket, {required bool retry}) {

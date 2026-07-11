@@ -23,6 +23,7 @@ const fallbackState = {
     label: "Alt+M",
     version: 0,
   },
+  inputGateMode: "pause",
   inputGateHotkey: {
     registered: false,
     error: null,
@@ -54,6 +55,7 @@ function FlowVoiceDesktopConsole() {
   const url = state.url || `http://${ip}:${port}/?token=${token}&v=voice`;
   const inputGate = state.inputGate || fallbackState.inputGate;
   const inputGateHotkey = state.inputGateHotkey || fallbackState.inputGateHotkey;
+  const inputGateMode = state.inputGateMode || "pause";
   const typingStats = state.typingStats || fallbackState.typingStats;
   const publicConnection = state.publicConnection || fallbackState.publicConnection;
   const connectionMode = state.connectionMode || "local";
@@ -301,11 +303,11 @@ function FlowVoiceDesktopConsole() {
             <div
               role="button"
               tabIndex={0}
-              onClick={() => callApi("toggle_input_pause")}
+              onClick={() => inputGateMode === "pause" && callApi("toggle_input_pause")}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
-                  callApi("toggle_input_pause");
+                  if (inputGateMode === "pause") callApi("toggle_input_pause");
                 }
               }}
               className={`rounded-[26px] border p-6 text-left shadow-[0_26px_80px_rgba(0,0,0,0.5)] backdrop-blur-xl transition ${
@@ -318,7 +320,11 @@ function FlowVoiceDesktopConsole() {
                 <div>
                   <div className="font-mono text-[11px] uppercase tracking-[0.28em] text-[#74E7A5]/70">Input Gate</div>
                   <h2 className={`mt-2 text-2xl font-semibold ${inputGate.paused ? "text-[#D7C47A]" : "text-[#F2FFF7]"}`}>
-                    {inputGate.paused ? "Input Paused" : "Input Active"}
+                    {inputGateMode === "voice_hold"
+                      ? "Hold Voice Ready"
+                      : inputGate.paused
+                        ? "Input Paused"
+                        : "Input Active"}
                   </h2>
                   <p className="mt-1 text-sm text-[#7FA98E]">Hotkey {inputGateHotkey.label || inputGate.label}</p>
                 </div>
@@ -345,6 +351,29 @@ function FlowVoiceDesktopConsole() {
                     Change
                   </span>
                 </div>
+              </div>
+              <div
+                className="mt-5 grid grid-cols-2 rounded-xl border border-[#234531] bg-[#050A07] p-1"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <button
+                  type="button"
+                  onClick={() => callApi("set_input_gate_mode", "pause")}
+                  className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                    inputGateMode === "pause" ? "bg-[#163A26] text-[#B9FFD4]" : "text-[#6F8D79] hover:text-[#A8F7C4]"
+                  }`}
+                >
+                  Pause Input
+                </button>
+                <button
+                  type="button"
+                  onClick={() => callApi("set_input_gate_mode", "voice_hold")}
+                  className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                    inputGateMode === "voice_hold" ? "bg-[#163A26] text-[#B9FFD4]" : "text-[#6F8D79] hover:text-[#A8F7C4]"
+                  }`}
+                >
+                  Hold Voice
+                </button>
               </div>
             </div>
 
