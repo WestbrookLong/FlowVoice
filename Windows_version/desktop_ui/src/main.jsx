@@ -48,6 +48,7 @@ function FlowVoiceDesktopConsole() {
   const [message, setMessage] = React.useState("");
   const [typingStatsOpen, setTypingStatsOpen] = React.useState(false);
   const [capturingHotkey, setCapturingHotkey] = React.useState(false);
+  const [singleKeyCapture, setSingleKeyCapture] = React.useState({ key: "", progress: 0 });
   const refreshInFlight = React.useRef(false);
 
   const ip = state.ip;
@@ -111,23 +112,21 @@ function FlowVoiceDesktopConsole() {
     if (!capturingHotkey) {
       return undefined;
     }
-    const handleKeyDown = async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.key === "Escape") {
-        setCapturingHotkey(false);
-        setMessage("Hotkey capture cancelled.");
-        return;
-      }
-      const modifierOnly = ["Control", "Alt", "Shift", "Meta"].includes(event.key);
-      if (modifierOnly) {
-        return;
-      }
-      const hasModifier = event.ctrlKey || event.altKey || event.shiftKey || event.metaKey;
-      if (!hasModifier) {
-        setMessage("Please include Ctrl, Alt, Shift, or Win.");
-        return;
-      }
+    let holdTimer = null;
+    let progressTimer = null;
+    let candidateId = "";
+
+    const clearSingleKeyHold = () => {
+      if (holdTimer !== null) window.clearTimeout(holdTimer);
+      if (progressTimer !== null) window.clearInterval(progressTimer);
+      holdTimer = null;
+      progressTimer = null;
+      candidateId = "";
+      setSingleKeyCapture({ key: "", progress: 0 });
+    };
+
+    const submitHotkey = async (event, singleKey = false) => {
+      clearSingleKeyHold();
       setCapturingHotkey(false);
       await callApi("set_input_gate_hotkey", {
         key: event.key,
@@ -136,10 +135,62 @@ function FlowVoiceDesktopConsole() {
         altKey: event.altKey,
         shiftKey: event.shiftKey,
         metaKey: event.metaKey,
+        singleKey,
       });
     };
+
+    const handleKeyDown = async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        clearSingleKeyHold();
+        setCapturingHotkey(false);
+        setMessage("Hotkey capture cancelled.");
+        return;
+      }
+      const modifierOnly = ["Control", "Alt", "Shift", "Meta"].includes(event.key);
+      const hasModifier = event.ctrlKey || event.altKey || event.shiftKey || event.metaKey;
+      if (hasModifier && !modifierOnly) {
+        await submitHotkey(event);
+        return;
+      }
+      if (event.repeat) return;
+
+      clearSingleKeyHold();
+      candidateId = event.code || event.key;
+      const capturedEvent = {
+        key: event.key,
+        code: event.code,
+        ctrlKey: event.ctrlKey,
+        altKey: event.altKey,
+        shiftKey: event.shiftKey,
+        metaKey: event.metaKey,
+      };
+      const startedAt = window.performance.now();
+      setSingleKeyCapture({ key: event.key, progress: 0 });
+      setMessage(`Keep holding ${event.key} for 3 seconds.`);
+      progressTimer = window.setInterval(() => {
+        const progress = Math.min(100, ((window.performance.now() - startedAt) / 3000) * 100);
+        setSingleKeyCapture({ key: event.key, progress });
+      }, 50);
+      holdTimer = window.setTimeout(() => submitHotkey(capturedEvent, true), 3000);
+    };
+
+    const handleKeyUp = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if ((event.code || event.key) === candidateId && holdTimer !== null) {
+        clearSingleKeyHold();
+        setMessage("Single key released before 3 seconds.");
+      }
+    };
     window.addEventListener("keydown", handleKeyDown, true);
-    return () => window.removeEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp, true);
+    return () => {
+      clearSingleKeyHold();
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
+    };
   }, [capturingHotkey]);
 
   async function callApi(action, payload) {
@@ -404,21 +455,39 @@ function FlowVoiceDesktopConsole() {
           onClose={() => setTypingStatsOpen(false)}
         />
       )}
-      {capturingHotkey && <HotkeyCaptureOverlay onCancel={() => setCapturingHotkey(false)} />}
+      {capturingHotkey && (
+        <HotkeyCaptureOverlay
+          singleKeyCapture={singleKeyCapture}
+          onCancel={() => setCapturingHotkey(false)}
+        />
+      )}
       </div>
     </div>
   );
 }
 
-function HotkeyCaptureOverlay({ onCancel }) {
+function HotkeyCaptureOverlay({ onCancel, singleKeyCapture }) {
   return createPortal(
     <div className="fixed inset-0 z-[120] grid place-items-center bg-[#020503]/78 backdrop-blur-sm">
       <div className="w-[min(460px,calc(100vw-48px))] rounded-[26px] border border-[#2E7447] bg-[#08100D] p-7 text-center shadow-[0_30px_90px_rgba(0,0,0,0.62)]">
         <div className="font-mono text-[11px] uppercase tracking-[0.3em] text-[#74E7A5]/70">Input Gate Hotkey</div>
         <h2 className="mt-3 text-2xl font-semibold text-[#F2FFF7]">请按下快捷键</h2>
         <p className="mt-3 text-sm leading-6 text-[#8EA99A]">
-          需要包含 Ctrl、Alt、Shift 或 Win。若快捷键已被系统占用，会自动保留原设置。
+          组合键会立即保存；单个按键需要持续按住 3 秒。若快捷键已被系统占用，会自动保留原设置。
         </p>
+        {singleKeyCapture?.key && (
+          <div className="mt-5">
+            <div className="mb-2 font-mono text-xs text-[#B9FFD4]">
+              {singleKeyCapture.key} · {Math.floor(singleKeyCapture.progress / 33.34) + 1}/3s
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-[#102019]">
+              <div
+                className="h-full rounded-full bg-[#28F58D] transition-[width] duration-75"
+                style={{ width: `${singleKeyCapture.progress}%` }}
+              />
+            </div>
+          </div>
+        )}
         <button
           type="button"
           onClick={onCancel}

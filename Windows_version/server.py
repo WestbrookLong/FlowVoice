@@ -65,6 +65,9 @@ class PhoneControlHub:
     def detach(self, ws: web.WebSocketResponse) -> None:
         self.connections.discard(ws)
 
+    def has_connections(self) -> bool:
+        return any(not ws.closed for ws in self.connections)
+
     async def broadcast(self, payload: dict[str, Any]) -> int:
         sent = 0
         stale: list[web.WebSocketResponse] = []
@@ -533,6 +536,7 @@ def create_app(
     typing_stats: Any = None,
     input_gate: Any = None,
     phone_control: PhoneControlHub | None = None,
+    voice_hold_state_callback: Callable[[bool, str], None] | None = None,
 ) -> web.Application:
     app = web.Application()
     session = FlowInputSession(
@@ -605,6 +609,25 @@ def create_app(
                     continue
 
                 message_type = payload.get("type")
+                if message_type == "voice_hold_state":
+                    active = payload.get("active")
+                    reason = payload.get("reason", "released")
+                    if not isinstance(active, bool):
+                        raise ValueError("voice_hold_state.active must be a boolean")
+                    if reason not in {
+                        "started",
+                        "released",
+                        "gesture_cancelled",
+                        "pending_cancelled",
+                        "overlay_closed",
+                        "service_stopped",
+                        "keyboard_hidden",
+                    }:
+                        raise ValueError("voice_hold_state.reason is invalid")
+                    if voice_hold_state_callback is not None:
+                        voice_hold_state_callback(active, reason)
+                    await ws.send_json({"type": "ack", "seq": payload.get("seq")})
+                    continue
                 if input_gate is not None and input_gate.is_paused():
                     if not input_gate_blocked:
                         if text_agent_route_active:
@@ -715,6 +738,8 @@ def create_app(
 
         if phone_control is not None:
             phone_control.detach(ws)
+            if not phone_control.has_connections() and voice_hold_state_callback is not None:
+                voice_hold_state_callback(False, "service_stopped")
         log(f"[ws] disconnected: {peer}")
         return ws
 

@@ -18,11 +18,13 @@ import android.text.TextWatcher
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 import kotlin.math.abs
 
 class FloatingInputService : Service() {
@@ -36,6 +38,15 @@ class FloatingInputService : Service() {
     private var autoVoiceClickEnabled = false
     private var autoVoiceClickDelayMs = 500
     private var autoVoiceClickDurationMs = 500
+    private var remoteHoldGeneration = 0
+    private var remoteHoldPending = false
+    private var remoteHoldRequested = false
+    private var remoteKeyboardSeen = false
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -63,7 +74,10 @@ class FloatingInputService : Service() {
     }
 
     override fun onDestroy() {
-        removeOverlay()
+        if (instance === this) {
+            instance = null
+        }
+        removeOverlay("service_stopped")
         BuiltInVoiceEngine.stop()
         super.onDestroy()
     }
@@ -93,6 +107,7 @@ class FloatingInputService : Service() {
         if (builtInVoice) {
             return
         }
+        installImeVisibilityMonitor()
         val input = hiddenInput ?: return
         if (input.text.toString() != text) {
             suppressTextCallback = true
@@ -342,7 +357,11 @@ class FloatingInputService : Service() {
         MainActivity.sendBuiltInVoiceStatus(status)
     }
 
-    private fun focusInput(input: EditText) {
+    private fun focusInput(
+        input: EditText,
+        triggerAutoVoiceClick: Boolean = true,
+        afterKeyboardRequest: (() -> Unit)? = null,
+    ) {
         setOverlayFocusable(true)
         input.isFocusable = true
         input.isFocusableInTouchMode = true
@@ -350,8 +369,80 @@ class FloatingInputService : Service() {
         input.postDelayed({
             val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
             imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
-            maybeAutoClickVoiceKey(input)
+            afterKeyboardRequest?.invoke()
+            if (triggerAutoVoiceClick) {
+                maybeAutoClickVoiceKey(input)
+            }
         }, 80)
+    }
+
+    private fun startRemoteVoiceHold(): String {
+        if (builtInVoiceMode) {
+            return "voice_hold_overlay_unavailable"
+        }
+        val input = hiddenInput ?: return "voice_hold_overlay_unavailable"
+        val generation = ++remoteHoldGeneration
+        remoteHoldPending = true
+        remoteHoldRequested = true
+        remoteKeyboardSeen = false
+        overlayView?.requestApplyInsets()
+        focusInput(input, triggerAutoVoiceClick = false) {
+            input.postDelayed({
+                if (generation != remoteHoldGeneration || instance !== this) {
+                    return@postDelayed
+                }
+                remoteHoldPending = false
+                val result = VoiceKeyClickAccessibilityService.startHold(applicationContext)
+                if (result != "ok") {
+                    remoteHoldRequested = false
+                    showRemoteHoldDiagnostic(result)
+                    MainActivity.sendVoiceHoldState(false, "gesture_cancelled")
+                }
+            }, autoVoiceClickDelayMs.coerceIn(200, 1200).toLong())
+        }
+        return "ok"
+    }
+
+    private fun stopRemoteVoiceHold(reason: String = "released") {
+        val wasPending = remoteHoldPending
+        remoteHoldGeneration += 1
+        remoteHoldPending = false
+        remoteHoldRequested = false
+        remoteKeyboardSeen = false
+        if (wasPending) {
+            MainActivity.sendVoiceHoldState(
+                false,
+                if (reason == "released") "pending_cancelled" else reason,
+            )
+        }
+        VoiceKeyClickAccessibilityService.stopHold(reason)
+    }
+
+    private fun installImeVisibilityMonitor() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return
+        }
+        overlayView?.setOnApplyWindowInsetsListener { _, insets ->
+            val visible = insets.isVisible(WindowInsets.Type.ime())
+            if (visible) {
+                remoteKeyboardSeen = true
+            } else if (remoteHoldRequested && remoteKeyboardSeen) {
+                stopRemoteVoiceHold("keyboard_hidden")
+            }
+            insets
+        }
+    }
+
+    private fun showRemoteHoldDiagnostic(code: String) {
+        MainActivity.sendOverlayDiagnostic(code)
+        val message = when (code) {
+            "accessibility_not_running" -> "请先开启 Flow Voice 无障碍服务"
+            "voice_click_point_missing" -> "请先校准语音键点击位置"
+            "voice_click_point_invalid" -> "语音键点击位置无效，请重新校准"
+            "voice_hold_requires_android_8" -> "长按语音需要 Android 8.0 或更高版本"
+            else -> "远程语音长按启动失败"
+        }
+        Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
     }
 
     private fun maybeAutoClickVoiceKey(anchor: View) {
@@ -428,7 +519,8 @@ class FloatingInputService : Service() {
         button.background = voiceButtonDrawable(listening)
     }
 
-    private fun removeOverlay() {
+    private fun removeOverlay(reason: String = "overlay_closed") {
+        stopRemoteVoiceHold(reason)
         val root = overlayView
         val manager = windowManager
         if (root != null && manager != null) {
@@ -519,6 +611,28 @@ class FloatingInputService : Service() {
     }
 
     companion object {
+        @Volatile
+        private var instance: FloatingInputService? = null
+
+        fun isRunning(): Boolean = instance?.overlayView != null
+
+        fun startRemoteVoiceHoldIfRunning(): String? {
+            val service = instance ?: return null
+            if (service.overlayView == null) {
+                return null
+            }
+            return service.startRemoteVoiceHold()
+        }
+
+        fun stopRemoteVoiceHoldIfRunning(): Boolean {
+            val service = instance ?: return false
+            if (service.overlayView == null) {
+                return false
+            }
+            service.stopRemoteVoiceHold()
+            return true
+        }
+
         const val ACTION_START = "com.westbrook.voiceinput.voice_input_mobile.START_FLOATING_INPUT"
         const val ACTION_STOP = "com.westbrook.voiceinput.voice_input_mobile.STOP_FLOATING_INPUT"
         const val EXTRA_TEXT = "text"

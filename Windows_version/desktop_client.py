@@ -166,6 +166,19 @@ def normalize_desktop_voice_config(value: dict | None) -> dict:
     return config
 
 
+MODIFIER_EQUIVALENT_VK_CODES = {
+    0x10: {0x10, 0xA0, 0xA1},  # Shift, Left Shift, Right Shift
+    0x11: {0x11, 0xA2, 0xA3},  # Ctrl, Left Ctrl, Right Ctrl
+    0x12: {0x12, 0xA4, 0xA5},  # Alt, Left Alt, Right Alt
+    0x5B: {0x5B, 0x5C},        # Left Win, Right Win
+    0x5C: {0x5B, 0x5C},
+}
+
+
+def _equivalent_virtual_keys(virtual_key: int) -> set[int]:
+    return MODIFIER_EQUIVALENT_VK_CODES.get(virtual_key, {virtual_key})
+
+
 def _hotkey_label(modifiers: int, virtual_key: int) -> str:
     parts: list[str] = []
     if modifiers & TextAgentHotkeyThread.MOD_CONTROL:
@@ -176,7 +189,23 @@ def _hotkey_label(modifiers: int, virtual_key: int) -> str:
         parts.append("Shift")
     if modifiers & TextAgentHotkeyThread.MOD_WIN:
         parts.append("Win")
-    key_label = chr(virtual_key) if 0x30 <= virtual_key <= 0x5A else None
+    key_label = {
+        0x10: "Shift",
+        0xA0: "Shift",
+        0xA1: "Shift",
+        0x11: "Ctrl",
+        0xA2: "Ctrl",
+        0xA3: "Ctrl",
+        0x12: "Alt",
+        0xA4: "Alt",
+        0xA5: "Alt",
+        0x5B: "Win",
+        0x5C: "Win",
+    }.get(virtual_key)
+    if key_label is None and 0x30 <= virtual_key <= 0x5A:
+        key_label = chr(virtual_key)
+    if key_label is None and 0x70 <= virtual_key <= 0x87:
+        key_label = f"F{virtual_key - 0x6F}"
     if key_label is None:
         reverse = {value: key for key, value in VK_NAME_TO_CODE.items()}
         key_label = reverse.get(virtual_key, f"VK{virtual_key}")
@@ -197,6 +226,17 @@ def _virtual_key_from_payload(payload: dict) -> int | None:
     code = str(payload.get("code", "")).strip()
     key = str(payload.get("key", "")).strip()
     upper_key = key.upper()
+    modifier_keys = {
+        "SHIFT": 0x10,
+        "CONTROL": 0x11,
+        "CTRL": 0x11,
+        "ALT": 0x12,
+        "META": 0x5B,
+        "OS": 0x5B,
+        "WIN": 0x5B,
+    }
+    if upper_key in modifier_keys:
+        return modifier_keys[upper_key]
     if code.startswith("Key") and len(code) == 4:
         return ord(code[-1].upper())
     if code.startswith("Digit") and len(code) == 6:
@@ -220,28 +260,23 @@ def normalize_input_gate_hotkey(payload: dict | None) -> dict:
     else:
         virtual_key = _virtual_key_from_payload(source)
         modifiers = 0
-        if bool(source.get("ctrlKey", False)):
+        single_key = bool(source.get("singleKey", False))
+        if not single_key and bool(source.get("ctrlKey", False)):
             modifiers |= TextAgentHotkeyThread.MOD_CONTROL
-        if bool(source.get("altKey", False)):
+        if not single_key and bool(source.get("altKey", False)):
             modifiers |= TextAgentHotkeyThread.MOD_ALT
-        if bool(source.get("shiftKey", False)):
+        if not single_key and bool(source.get("shiftKey", False)):
             modifiers |= TextAgentHotkeyThread.MOD_SHIFT
-        if bool(source.get("metaKey", False)):
+        if not single_key and bool(source.get("metaKey", False)):
             modifiers |= TextAgentHotkeyThread.MOD_WIN
         if virtual_key is None:
             raise ValueError("Unsupported hotkey key.")
-        if modifiers == 0:
-            raise ValueError("Please include Ctrl, Alt, Shift, or Win.")
     modifiers &= (
         TextAgentHotkeyThread.MOD_ALT
         | TextAgentHotkeyThread.MOD_CONTROL
         | TextAgentHotkeyThread.MOD_SHIFT
         | TextAgentHotkeyThread.MOD_WIN
     )
-    if modifiers == 0:
-        raise ValueError("Please include Ctrl, Alt, Shift, or Win.")
-    if virtual_key in {0x10, 0x11, 0x12, 0x5B, 0x5C}:
-        raise ValueError("Modifier-only hotkeys are not supported.")
     return {
         "virtual_key": virtual_key,
         "modifiers": modifiers,
@@ -365,6 +400,7 @@ class BridgeServerThread(threading.Thread):
         text_agent: TextAgentManager | None = None,
         typing_stats: TypingStats | None = None,
         input_gate: InputGate | None = None,
+        voice_hold_state_callback=None,
     ) -> None:
         super().__init__(daemon=True)
         self.host = host
@@ -373,6 +409,7 @@ class BridgeServerThread(threading.Thread):
         self.text_agent = text_agent
         self.typing_stats = typing_stats
         self.input_gate = input_gate
+        self.voice_hold_state_callback = voice_hold_state_callback
         self.loop: asyncio.AbstractEventLoop | None = None
         self.runner: web.AppRunner | None = None
         self.ready = threading.Event()
@@ -400,6 +437,7 @@ class BridgeServerThread(threading.Thread):
             typing_stats=self.typing_stats,
             input_gate=self.input_gate,
             phone_control=self.phone_control,
+            voice_hold_state_callback=self.voice_hold_state_callback,
         )
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
@@ -498,6 +536,7 @@ class HoldHotkeyThread(threading.Thread):
         self.on_press = on_press
         self.on_release = on_release
         self.virtual_key = virtual_key
+        self.virtual_keys = _equivalent_virtual_keys(virtual_key)
         self.modifiers = modifiers
         self.label = label
         self.thread_id: int | None = None
@@ -527,6 +566,13 @@ class HoldHotkeyThread(threading.Thread):
             return
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        probe_id = 0x4643
+        probe_modifiers = self.modifiers | TextAgentHotkeyThread.MOD_NOREPEAT
+        if not user32.RegisterHotKey(None, probe_id, probe_modifiers, self.virtual_key):
+            self.error = f"Hotkey is already in use: {ctypes.get_last_error()}"
+            self.ready.set()
+            return
+        user32.UnregisterHotKey(None, probe_id)
         user32.SetWindowsHookExW.argtypes = (ctypes.c_int, ctypes.c_void_p, wintypes.HINSTANCE, wintypes.DWORD)
         user32.SetWindowsHookExW.restype = wintypes.HHOOK
         user32.CallNextHookEx.argtypes = (wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
@@ -541,7 +587,7 @@ class HoldHotkeyThread(threading.Thread):
         def hook_proc(code, w_param, l_param):
             if code >= 0:
                 vk_code = ctypes.cast(l_param, ctypes.POINTER(ctypes.c_uint))[0]
-                if vk_code == self.virtual_key:
+                if vk_code in self.virtual_keys:
                     if w_param in (self.WM_KEYDOWN, self.WM_SYSKEYDOWN) and self._modifiers_down(user32):
                         if not self.pressed:
                             self.pressed = True
@@ -1400,7 +1446,15 @@ class DesktopApi:
         except ValueError:
             return None, "Port must be between 1 and 65535."
 
-        thread = BridgeServerThread("0.0.0.0", port, self.token, self.text_agent, self.typing_stats, self.input_gate)
+        thread = BridgeServerThread(
+            "0.0.0.0",
+            port,
+            self.token,
+            self.text_agent,
+            self.typing_stats,
+            self.input_gate,
+            self._handle_phone_voice_hold_state,
+        )
         self.server_thread = thread
         thread.start()
         return thread, None
@@ -1659,6 +1713,11 @@ class DesktopApi:
         self.tap_voice_active = started
         return self._result("Tap Voice active." if started else "No phone is connected.")
 
+    def _handle_phone_voice_hold_state(self, active: bool, reason: str) -> None:
+        with self.lock:
+            self.tap_voice_active = bool(active) if self.input_gate_mode == "tap_voice" else False
+        log(f"[phone-control] voice hold active={active} reason={reason}")
+
     def _release_tap_voice(self) -> None:
         if self.tap_voice_active:
             self._send_voice_hold(False)
@@ -1875,6 +1934,15 @@ class DesktopApi:
                     lambda: self._send_voice_hold(False),
                     virtual_key=hotkey["virtual_key"],
                     modifiers=hotkey["modifiers"],
+                    label=hotkey["label"],
+                )
+            elif hotkey["modifiers"] == 0:
+                callback = self.toggle_tap_voice if self.input_gate_mode == "tap_voice" else self.toggle_input_pause
+                thread = HoldHotkeyThread(
+                    callback,
+                    lambda: None,
+                    virtual_key=hotkey["virtual_key"],
+                    modifiers=0,
                     label=hotkey["label"],
                 )
             else:

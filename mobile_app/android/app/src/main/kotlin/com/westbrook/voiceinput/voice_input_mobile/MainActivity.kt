@@ -49,10 +49,16 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "startVoiceHold" -> {
-                    result.success(VoiceKeyClickAccessibilityService.startHold(applicationContext))
+                    val overlayResult = FloatingInputService.startRemoteVoiceHoldIfRunning()
+                    result.success(
+                        overlayResult
+                            ?: VoiceKeyClickAccessibilityService.startHold(applicationContext),
+                    )
                 }
                 "stopVoiceHold" -> {
-                    VoiceKeyClickAccessibilityService.stopHold()
+                    if (!FloatingInputService.stopRemoteVoiceHoldIfRunning()) {
+                        VoiceKeyClickAccessibilityService.stopHold()
+                    }
                     result.success(null)
                 }
                 "startBuiltInVoice" -> {
@@ -179,6 +185,13 @@ class MainActivity : FlutterActivity() {
 
         fun sendOverlayDiagnostic(message: String) {
             overlayChannel?.invokeMethod("overlayDiagnostic", message)
+        }
+
+        fun sendVoiceHoldState(active: Boolean, reason: String) {
+            overlayChannel?.invokeMethod(
+                "voiceHoldState",
+                mapOf("active" to active, "reason" to reason),
+            )
         }
     }
 }

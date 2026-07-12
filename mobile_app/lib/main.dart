@@ -291,6 +291,20 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       }
       return null;
     }
+    if (call.method == 'voiceHoldState') {
+      final args = call.arguments;
+      if (args is Map && args['active'] is bool) {
+        _send(<String, Object?>{
+          'type': 'voice_hold_state',
+          'token': _tokenController.text.trim(),
+          'seq': ++_seq,
+          'active': args['active'] as bool,
+          'reason':
+              args['reason'] is String ? args['reason'] as String : 'released',
+        });
+      }
+      return null;
+    }
     if (call.method == 'builtInVoiceText') {
       final args = call.arguments;
       if (args is! Map) {
@@ -488,6 +502,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       'voice_click_point_invalid' => '语音键点击位置无效，请重新校准。',
       'voice_click_dispatch_failed' => '自动点击失败，请检查无障碍权限。',
       'voice_hold_requires_android_8' => '长按语音需要 Android 8.0 或更高版本。',
+      'voice_hold_overlay_unavailable' => '当前悬浮窗无法承接系统键盘输入。',
       _ => message,
     };
     if (!mounted) {
@@ -827,6 +842,7 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     if (!identical(socket, _socket)) {
       return;
     }
+    unawaited(_stopRemoteVoiceHold());
     _socket = null;
     _setStatus(BridgeStatus.disconnected, '断开');
     if (retry) {

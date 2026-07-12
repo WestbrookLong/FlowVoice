@@ -23,7 +23,10 @@ class VoiceKeyClickAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     override fun onDestroy() {
-        stopHold()
+        if (holdActive) {
+            MainActivity.sendVoiceHoldState(false, "service_stopped")
+        }
+        stopHold("service_stopped")
         if (instance === this) {
             instance = null
         }
@@ -97,6 +100,7 @@ class VoiceKeyClickAccessibilityService : AccessibilityService() {
             val generation = ++holdGeneration
             holdActive = true
             holdReleaseRequested = false
+            holdStopReason = "released"
             val offset = HOLD_OFFSET_DP * service.resources.displayMetrics.density
             val firstEndX = x + offset
             val firstPath = Path().apply {
@@ -118,11 +122,15 @@ class VoiceKeyClickAccessibilityService : AccessibilityService() {
                 offsetX = firstEndX,
                 generation = generation,
             )
+            if (holdActive) {
+                MainActivity.sendVoiceHoldState(true, "started")
+            }
             return "ok"
         }
 
-        fun stopHold() {
+        fun stopHold(reason: String = "released") {
             if (holdActive) {
+                holdStopReason = reason
                 holdReleaseRequested = true
             }
         }
@@ -177,11 +185,10 @@ class VoiceKeyClickAccessibilityService : AccessibilityService() {
 
                     override fun onCancelled(gestureDescription: GestureDescription?) {
                         if (generation == holdGeneration) {
+                            val reason = if (holdReleaseRequested) holdStopReason else "gesture_cancelled"
                             holdActive = false
                             holdReleaseRequested = false
-                            if (instance === service) {
-                                MainActivity.sendOverlayDiagnostic("voice_click_dispatch_failed")
-                            }
+                            MainActivity.sendVoiceHoldState(false, reason)
                         }
                     }
                 },
@@ -190,6 +197,7 @@ class VoiceKeyClickAccessibilityService : AccessibilityService() {
             if (!dispatched) {
                 holdActive = false
                 holdReleaseRequested = false
+                MainActivity.sendVoiceHoldState(false, "gesture_cancelled")
                 MainActivity.sendOverlayDiagnostic("voice_click_dispatch_failed")
             }
         }
@@ -236,6 +244,7 @@ class VoiceKeyClickAccessibilityService : AccessibilityService() {
             if (generation == holdGeneration) {
                 holdActive = false
                 holdReleaseRequested = false
+                MainActivity.sendVoiceHoldState(false, holdStopReason)
             }
         }
 
@@ -247,6 +256,7 @@ class VoiceKeyClickAccessibilityService : AccessibilityService() {
         private val mainHandler = Handler(Looper.getMainLooper())
         private var holdActive = false
         private var holdReleaseRequested = false
+        private var holdStopReason = "released"
         private var holdGeneration = 0
     }
 }
