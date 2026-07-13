@@ -43,6 +43,20 @@ function desktopApi() {
   return window.pywebview?.api;
 }
 
+function hotkeyKeyName(event) {
+  const codeNames = {
+    AltLeft: "Left Alt",
+    AltRight: "Right Alt",
+    ControlLeft: "Left Ctrl",
+    ControlRight: "Right Ctrl",
+    ShiftLeft: "Left Shift",
+    ShiftRight: "Right Shift",
+    MetaLeft: "Left Win",
+    MetaRight: "Right Win",
+  };
+  return codeNames[event.code] || event.key;
+}
+
 function FlowVoiceDesktopConsole() {
   const [state, setState] = React.useState(fallbackState);
   const [message, setMessage] = React.useState("");
@@ -148,7 +162,7 @@ function FlowVoiceDesktopConsole() {
         setMessage("Hotkey capture cancelled.");
         return;
       }
-      const modifierOnly = ["Control", "Alt", "Shift", "Meta"].includes(event.key);
+      const modifierOnly = ["Control", "Alt", "AltGraph", "Shift", "Meta"].includes(event.key);
       const hasModifier = event.ctrlKey || event.altKey || event.shiftKey || event.metaKey;
       if (hasModifier && !modifierOnly) {
         await submitHotkey(event);
@@ -167,11 +181,12 @@ function FlowVoiceDesktopConsole() {
         metaKey: event.metaKey,
       };
       const startedAt = window.performance.now();
-      setSingleKeyCapture({ key: event.key, progress: 0 });
-      setMessage(`Keep holding ${event.key} for 3 seconds.`);
+      const keyName = hotkeyKeyName(event);
+      setSingleKeyCapture({ key: keyName, progress: 0 });
+      setMessage(`Keep holding ${keyName} for 3 seconds.`);
       progressTimer = window.setInterval(() => {
         const progress = Math.min(100, ((window.performance.now() - startedAt) / 3000) * 100);
-        setSingleKeyCapture({ key: event.key, progress });
+        setSingleKeyCapture({ key: keyName, progress });
       }, 50);
       holdTimer = window.setTimeout(() => submitHotkey(capturedEvent, true), 3000);
     };

@@ -166,17 +166,15 @@ def normalize_desktop_voice_config(value: dict | None) -> dict:
     return config
 
 
-MODIFIER_EQUIVALENT_VK_CODES = {
+GENERIC_MODIFIER_EQUIVALENT_VK_CODES = {
     0x10: {0x10, 0xA0, 0xA1},  # Shift, Left Shift, Right Shift
     0x11: {0x11, 0xA2, 0xA3},  # Ctrl, Left Ctrl, Right Ctrl
     0x12: {0x12, 0xA4, 0xA5},  # Alt, Left Alt, Right Alt
-    0x5B: {0x5B, 0x5C},        # Left Win, Right Win
-    0x5C: {0x5B, 0x5C},
 }
 
 
 def _equivalent_virtual_keys(virtual_key: int) -> set[int]:
-    return MODIFIER_EQUIVALENT_VK_CODES.get(virtual_key, {virtual_key})
+    return GENERIC_MODIFIER_EQUIVALENT_VK_CODES.get(virtual_key, {virtual_key})
 
 
 def _hotkey_label(modifiers: int, virtual_key: int) -> str:
@@ -191,16 +189,16 @@ def _hotkey_label(modifiers: int, virtual_key: int) -> str:
         parts.append("Win")
     key_label = {
         0x10: "Shift",
-        0xA0: "Shift",
-        0xA1: "Shift",
+        0xA0: "Left Shift",
+        0xA1: "Right Shift",
         0x11: "Ctrl",
-        0xA2: "Ctrl",
-        0xA3: "Ctrl",
+        0xA2: "Left Ctrl",
+        0xA3: "Right Ctrl",
         0x12: "Alt",
-        0xA4: "Alt",
-        0xA5: "Alt",
-        0x5B: "Win",
-        0x5C: "Win",
+        0xA4: "Left Alt",
+        0xA5: "Right Alt",
+        0x5B: "Left Win",
+        0x5C: "Right Win",
     }.get(virtual_key)
     if key_label is None and 0x30 <= virtual_key <= 0x5A:
         key_label = chr(virtual_key)
@@ -226,11 +224,26 @@ def _virtual_key_from_payload(payload: dict) -> int | None:
     code = str(payload.get("code", "")).strip()
     key = str(payload.get("key", "")).strip()
     upper_key = key.upper()
+    modifier_codes = {
+        "ShiftLeft": 0xA0,
+        "ShiftRight": 0xA1,
+        "ControlLeft": 0xA2,
+        "ControlRight": 0xA3,
+        "AltLeft": 0xA4,
+        "AltRight": 0xA5,
+        "MetaLeft": 0x5B,
+        "MetaRight": 0x5C,
+        "OSLeft": 0x5B,
+        "OSRight": 0x5C,
+    }
+    if code in modifier_codes:
+        return modifier_codes[code]
     modifier_keys = {
         "SHIFT": 0x10,
         "CONTROL": 0x11,
         "CTRL": 0x11,
         "ALT": 0x12,
+        "ALTGRAPH": 0xA5,
         "META": 0x5B,
         "OS": 0x5B,
         "WIN": 0x5B,
