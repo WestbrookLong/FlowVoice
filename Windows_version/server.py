@@ -1,5 +1,6 @@
 import argparse
 import ctypes
+import difflib
 import json
 import logging
 import os
@@ -272,9 +273,13 @@ class FlowInputSession:
         log(f"[sync] rebase at {self.raw_session_start} raw chars")
 
     def sync_state(self, raw_text: str, settings: BridgeSettings) -> None:
-        self.raw_text = trim_raw_text(raw_text, self)
-        if self.raw_session_start > len(self.raw_text):
-            self.raw_session_start = 0
+        next_raw_text = raw_text[-MAX_RAW_TEXT_LEN:]
+        self.raw_session_start = map_text_offset(
+            self.raw_text,
+            next_raw_text,
+            self.raw_session_start,
+        )
+        self.raw_text = next_raw_text
 
         iterations = 0
         while iterations < 64:
@@ -291,18 +296,6 @@ class FlowInputSession:
                 log("[inject] enter (line break)")
                 press_key(VK_RETURN)
                 self.raw_session_start += line_break_match.end()
-                self.text_session.reset()
-                continue
-
-            punctuation_command = parse_spoken_punctuation_command(active_text) if settings.convert_spoken_punctuation else None
-            if punctuation_command is not None:
-                prefix_raw, punctuation_text, consumed_length = punctuation_command
-                self.sync_processed_text(render_text(prefix_raw, settings))
-                log(f"[inject] punctuation {punctuation_text!r} (spoken punctuation)")
-                type_text(punctuation_text)
-                if self.on_text_inserted is not None:
-                    self.on_text_inserted(punctuation_text)
-                self.raw_session_start += consumed_length
                 self.text_session.reset()
                 continue
 
@@ -352,6 +345,30 @@ def common_prefix_len(left: str, right: str) -> int:
     while index < length and left[index] == right[index]:
         index += 1
     return index
+
+
+def map_text_offset(previous: str, current: str, offset: int) -> int:
+    offset = max(0, min(offset, len(previous)))
+    if offset == 0 or previous == current:
+        return min(offset, len(current))
+    if current.startswith(previous):
+        return offset
+    if previous.startswith(current):
+        return min(offset, len(current))
+
+    prefix_len = common_prefix_len(previous, current)
+    if prefix_len >= offset:
+        return offset
+
+    matcher = difflib.SequenceMatcher(None, previous, current, autojunk=False)
+    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if offset <= old_start:
+            return new_start
+        if tag == "equal" and offset <= old_end:
+            return new_start + (offset - old_start)
+        if tag != "insert" and offset <= old_end:
+            return new_end
+    return len(current)
 
 
 def trim_raw_text(raw_text: str, session: FlowInputSession) -> str:
@@ -451,15 +468,6 @@ def spoken_punctuation_symbol(phrase: str, text: str, start: int, end: int) -> s
         "引号": '"' if is_english else "”",
     }
     return mapping.get(phrase, phrase)
-
-
-def parse_spoken_punctuation_command(raw_text: str) -> tuple[str, str, int] | None:
-    match = SPOKEN_PUNCTUATION_PATTERN.search(raw_text)
-    if match is None:
-        return None
-    prefix_raw = raw_text[: match.start()].rstrip()
-    punctuation_text = spoken_punctuation_symbol(match.group(0), raw_text, match.start(), match.end())
-    return prefix_raw, punctuation_text, match.end()
 
 
 def cleanup_converted_punctuation(text: str) -> str:
