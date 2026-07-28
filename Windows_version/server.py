@@ -537,6 +537,7 @@ def create_app(
     input_gate: Any = None,
     phone_control: PhoneControlHub | None = None,
     voice_hold_state_callback: Callable[[bool, str], None] | None = None,
+    mobile_input_blocked_callback: Callable[[], bool] | None = None,
 ) -> web.Application:
     app = web.Application()
     session = FlowInputSession(
@@ -626,6 +627,15 @@ def create_app(
                         raise ValueError("voice_hold_state.reason is invalid")
                     if voice_hold_state_callback is not None:
                         voice_hold_state_callback(active, reason)
+                    await ws.send_json({"type": "ack", "seq": payload.get("seq")})
+                    continue
+                if mobile_input_blocked_callback is not None and mobile_input_blocked_callback():
+                    if not input_gate_blocked:
+                        if text_agent_route_active:
+                            text_agent_route_active = False
+                        session.reset()
+                    input_gate_blocked = True
+                    paused_raw_text = payload.get("text") if isinstance(payload.get("text"), str) else paused_raw_text
                     await ws.send_json({"type": "ack", "seq": payload.get("seq")})
                     continue
                 if input_gate is not None and input_gate.is_paused():

@@ -25,6 +25,17 @@ const fallbackState = {
   },
   inputGateMode: "pause",
   tapVoiceActive: false,
+  autoVoiceState: "ready",
+  activeInputSource: "mobile",
+  desktopOnnxVoice: {
+    enabled: false,
+    running: false,
+    paused: false,
+    status: "READY",
+    error: null,
+    model: "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
+    modelPath: "",
+  },
   inputGateHotkey: {
     registered: false,
     error: null,
@@ -73,6 +84,9 @@ function FlowVoiceDesktopConsole() {
   const inputGateHotkey = state.inputGateHotkey || fallbackState.inputGateHotkey;
   const inputGateMode = state.inputGateMode || "pause";
   const tapVoiceActive = Boolean(state.tapVoiceActive);
+  const autoVoiceState = state.autoVoiceState || "ready";
+  const autoVoiceActive = inputGateMode === "auto_voice" && autoVoiceState !== "ready";
+  const desktopOnnxVoice = state.desktopOnnxVoice || fallbackState.desktopOnnxVoice;
   const typingStats = state.typingStats || fallbackState.typingStats;
   const publicConnection = state.publicConnection || fallbackState.publicConnection;
   const connectionMode = state.connectionMode || "local";
@@ -335,6 +349,50 @@ function FlowVoiceDesktopConsole() {
                           Public Connect
                         </button>
                       )}
+                      <div className="rounded-xl border border-[#193324] bg-[#050C08]/80 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[#5B7062]">Desktop ONNX</span>
+                          <span
+                            className={`h-2 w-2 rounded-full ${
+                              desktopOnnxVoice.enabled && !desktopOnnxVoice.paused
+                                ? "bg-[#28F58D] shadow-[0_0_12px_rgba(40,245,141,0.8)]"
+                                : desktopOnnxVoice.enabled
+                                  ? "bg-[#D7C47A] shadow-[0_0_12px_rgba(215,196,122,0.55)]"
+                                  : "bg-[#5B7062]"
+                            }`}
+                          />
+                        </div>
+                        <div className="mt-2 truncate text-xs font-semibold text-[#B9FFD4]">
+                          {desktopOnnxVoice.enabled
+                            ? desktopOnnxVoice.paused
+                              ? "PAUSED"
+                              : desktopOnnxVoice.status || "LISTENING"
+                            : "READY"}
+                        </div>
+                        {desktopOnnxVoice.error && (
+                          <div className="mt-1 line-clamp-2 text-[10px] leading-4 text-[#FF9E9E]">{desktopOnnxVoice.error}</div>
+                        )}
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          {desktopOnnxVoice.enabled ? (
+                            <button onClick={() => callApi("stop_desktop_onnx_voice")} className="rounded-lg border border-[#6A5A20] bg-[#211C0B] px-2 py-2 text-[11px] font-semibold text-[#D7C47A] transition hover:bg-[#2A230D]">
+                              Stop
+                            </button>
+                          ) : (
+                            <button onClick={() => callApi("start_desktop_onnx_voice")} className="rounded-lg bg-[#28F58D] px-2 py-2 text-[11px] font-bold text-[#041008] transition hover:bg-[#67FFAD]">
+                              Start
+                            </button>
+                          )}
+                          {desktopOnnxVoice.paused ? (
+                            <button onClick={() => callApi("resume_desktop_onnx_voice")} className="rounded-lg border border-[#2E7447] bg-[#10291B] px-2 py-2 text-[11px] font-semibold text-[#B9FFD4] transition hover:bg-[#163A26]">
+                              Resume
+                            </button>
+                          ) : (
+                            <button onClick={() => callApi("pause_desktop_onnx_voice")} disabled={!desktopOnnxVoice.enabled} className="rounded-lg border border-[#2E7447] bg-[#10291B] px-2 py-2 text-[11px] font-semibold text-[#B9FFD4] transition hover:bg-[#163A26] disabled:cursor-not-allowed disabled:border-[#193324] disabled:text-[#4E6658]">
+                              Pause
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -394,14 +452,20 @@ function FlowVoiceDesktopConsole() {
                         ? tapVoiceActive
                           ? "Tap Voice Active"
                           : "Tap Voice Ready"
-                        : inputGate.paused
-                          ? "Input Paused"
-                          : "Input Active"}
+                        : inputGateMode === "auto_voice"
+                          ? autoVoiceState === "tap_active"
+                            ? "Auto Voice Tap Active"
+                            : autoVoiceState === "holding"
+                              ? "Auto Voice Holding"
+                              : "Auto Voice Ready"
+                          : inputGate.paused
+                            ? "Input Paused"
+                            : "Input Active"}
                   </h2>
                   <p className="mt-1 text-sm text-[#7FA98E]">Hotkey {inputGateHotkey.label || inputGate.label}</p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className={`h-4 w-4 rounded-full ${inputGate.paused ? "bg-[#D7C47A] shadow-[0_0_18px_rgba(215,196,122,0.75)]" : tapVoiceActive ? "bg-[#63D8FF] shadow-[0_0_18px_rgba(99,216,255,0.8)]" : "bg-[#28F58D] shadow-[0_0_18px_rgba(40,245,141,0.75)]"}`} />
+                  <span className={`h-4 w-4 rounded-full ${inputGate.paused ? "bg-[#D7C47A] shadow-[0_0_18px_rgba(215,196,122,0.75)]" : tapVoiceActive || autoVoiceActive ? "bg-[#63D8FF] shadow-[0_0_18px_rgba(99,216,255,0.8)]" : "bg-[#28F58D] shadow-[0_0_18px_rgba(40,245,141,0.75)]"}`} />
                   <span
                     role="button"
                     tabIndex={0}
@@ -425,7 +489,7 @@ function FlowVoiceDesktopConsole() {
                 </div>
               </div>
               <div
-                className="mt-5 grid grid-cols-3 rounded-xl border border-[#234531] bg-[#050A07] p-1"
+                className="mt-5 grid grid-cols-4 rounded-xl border border-[#234531] bg-[#050A07] p-1"
                 onClick={(event) => event.stopPropagation()}
               >
                 <button
@@ -454,6 +518,15 @@ function FlowVoiceDesktopConsole() {
                   }`}
                 >
                   Tap Voice
+                </button>
+                <button
+                  type="button"
+                  onClick={() => callApi("set_input_gate_mode", "auto_voice")}
+                  className={`rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                    inputGateMode === "auto_voice" ? "bg-[#163A26] text-[#B9FFD4]" : "text-[#6F8D79] hover:text-[#A8F7C4]"
+                  }`}
+                >
+                  Auto Voice
                 </button>
               </div>
             </div>

@@ -26,6 +26,8 @@ from asr.funasr_candidate_streaming_engine import FunASRCandidateStreamingEngine
 from asr.funasr_offline_engine import FunASROfflineEngine
 from asr.funasr_streaming_engine import DEFAULT_STREAMING_MODEL, FunASRStreamingEngine
 from asr.punctuation import PunctuationEngine
+from asr.sherpa_onnx_engine import MODEL_NAME as SHERPA_ONNX_MODEL_NAME
+from asr.sherpa_onnx_engine import SherpaOnnxStreamingEngine
 from asr.vosk_engine import VoskEngine
 from input_gate import InputGate
 from server import BridgeSettings, FlowInputSession, PhoneControlHub, create_app, get_lan_ip, log, render_text, send_backspace_chunks, type_text
@@ -46,7 +48,7 @@ DESKTOP_VOICE_DEFAULT_CONFIG = {
     "voiceCommands": True,
     "hotwords": "",
 }
-VALID_DESKTOP_VOICE_ENGINES = {"vosk", "funasr", "baidu"}
+VALID_DESKTOP_VOICE_ENGINES = {"vosk", "funasr", "baidu", "sherpa_onnx"}
 INPUT_GATE_HOTKEY_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "input_gate_hotkey.json"
 INPUT_GATE_MODE_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "input_gate_mode.json"
 CLOUDFLARED_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "cloudflared.exe"
@@ -57,6 +59,8 @@ DEFAULT_INPUT_GATE_HOTKEY = {
     "modifiers": 0x0001,
     "label": "Alt+M",
 }
+INPUT_GATE_MODES = {"pause", "voice_hold", "tap_voice", "auto_voice"}
+AUTO_VOICE_TAP_THRESHOLD_SECONDS = 0.3
 VK_NAME_TO_CODE = {
     "BACKSPACE": 0x08,
     "TAB": 0x09,
@@ -109,6 +113,19 @@ def desktop_voice_model_path() -> Path:
     return app_root() / "models" / DESKTOP_VOICE_MODEL_NAME
 
 
+def desktop_sherpa_onnx_model_path() -> Path:
+    configured = os.environ.get("FLOWVOICE_SHERPA_ONNX_MODEL")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    bundled = app_root() / "models" / SHERPA_ONNX_MODEL_NAME
+    if bundled.exists():
+        return bundled
+    mobile_asset = app_root().parent / "mobile_app" / "android" / "app" / "src" / "main" / "assets" / SHERPA_ONNX_MODEL_NAME
+    if mobile_asset.exists():
+        return mobile_asset
+    return bundled
+
+
 def should_insert_space(left: str, right: str) -> bool:
     return bool(left and right and left[-1].isascii() and right[0].isascii() and left[-1].isalnum() and right[0].isalnum())
 
@@ -125,7 +142,7 @@ def normalize_desktop_voice_config(value: dict | None) -> dict:
     source = value if isinstance(value, dict) else {}
     config = dict(DESKTOP_VOICE_DEFAULT_CONFIG)
     env_engine = os.environ.get("FLOWVOICE_DESKTOP_ENGINE")
-    if env_engine:
+    if env_engine and "engine" not in source:
         source = {**source, "engine": env_engine}
     env_baidu_dev_pid = os.environ.get("FLOWVOICE_BAIDU_DEV_PID")
     if env_baidu_dev_pid:
@@ -315,7 +332,7 @@ def load_input_gate_mode() -> str:
     try:
         if INPUT_GATE_MODE_PATH.exists():
             mode = json.loads(INPUT_GATE_MODE_PATH.read_text(encoding="utf-8")).get("mode")
-            if mode in {"pause", "voice_hold", "tap_voice"}:
+            if mode in INPUT_GATE_MODES:
                 return mode
     except Exception as exc:
         log(f"[input-gate] failed to load mode: {exc}")
@@ -339,6 +356,8 @@ def bridge_settings_from_desktop_config(config: dict) -> BridgeSettings:
 def create_asr_engine(config: dict, model_path: Path) -> StreamingASREngine:
     if config["engine"] == "vosk":
         return VoskEngine(model_path)
+    if config["engine"] == "sherpa_onnx":
+        return SherpaOnnxStreamingEngine(model_path)
     if config["engine"] == "baidu":
         return BaiduSpeechEngine(dev_pid=config.get("baiduDevPid", DEFAULT_BAIDU_DEV_PID))
     if config.get("funasrMode") == "candidate_streaming":
@@ -414,6 +433,7 @@ class BridgeServerThread(threading.Thread):
         typing_stats: TypingStats | None = None,
         input_gate: InputGate | None = None,
         voice_hold_state_callback=None,
+        mobile_input_blocked_callback=None,
     ) -> None:
         super().__init__(daemon=True)
         self.host = host
@@ -423,6 +443,7 @@ class BridgeServerThread(threading.Thread):
         self.typing_stats = typing_stats
         self.input_gate = input_gate
         self.voice_hold_state_callback = voice_hold_state_callback
+        self.mobile_input_blocked_callback = mobile_input_blocked_callback
         self.loop: asyncio.AbstractEventLoop | None = None
         self.runner: web.AppRunner | None = None
         self.ready = threading.Event()
@@ -451,6 +472,7 @@ class BridgeServerThread(threading.Thread):
             input_gate=self.input_gate,
             phone_control=self.phone_control,
             voice_hold_state_callback=self.voice_hold_state_callback,
+            mobile_input_blocked_callback=self.mobile_input_blocked_callback,
         )
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
@@ -739,8 +761,11 @@ class DesktopVoiceThread(threading.Thread):
             self.set_status(self._loading_status())
             self.asr_engine = create_asr_engine(self.config, self.model_path)
             self.asr_engine.start()
-            self.punctuation_engine = PunctuationEngine(self.config["punctuationStrategy"])
-            self.punctuation_engine.start()
+            if self._uses_mobile_text_stream():
+                self.punctuation_engine = None
+            else:
+                self.punctuation_engine = PunctuationEngine(self.config["punctuationStrategy"])
+                self.punctuation_engine.start()
         except Exception as exc:
             self.set_error(str(exc))
             self.ready.set()
@@ -791,10 +816,10 @@ class DesktopVoiceThread(threading.Thread):
                     endpoint_detector.reset()
                     continue
 
-                if self.config["engine"] == "vosk":
+                if self.config["engine"] in {"vosk", "sherpa_onnx"}:
                     drops = self._consume_audio_drops()
                     if drops:
-                        log(f"[endpoint] audio queue dropped {drops} frame(s) while using vosk")
+                        log(f"[endpoint] audio queue dropped {drops} frame(s) while using {self.config['engine']}")
                     self._handle_asr_events(self.asr_engine.accept_audio(data))
                     continue
 
@@ -872,6 +897,8 @@ class DesktopVoiceThread(threading.Thread):
     def _loading_status(self) -> str:
         if self.config["engine"] == "vosk":
             return "LOADING MODEL"
+        if self.config["engine"] == "sherpa_onnx":
+            return "LOADING SHERPA ONNX"
         if self.config["engine"] == "baidu":
             return "LOADING BAIDU ASR"
         if self.config.get("funasrMode") == "candidate_streaming":
@@ -883,6 +910,8 @@ class DesktopVoiceThread(threading.Thread):
     def _active_model_name(self) -> str:
         if self.config["engine"] == "vosk":
             return "vosk"
+        if self.config["engine"] == "sherpa_onnx":
+            return SHERPA_ONNX_MODEL_NAME
         if self.config["engine"] == "baidu":
             return f"baidu-dev-pid-{self.config.get('baiduDevPid', DEFAULT_BAIDU_DEV_PID)}"
         if self.config.get("funasrMode") in {"streaming", "candidate_streaming"}:
@@ -917,6 +946,9 @@ class DesktopVoiceThread(threading.Thread):
         if self._input_paused():
             self._discard_input_gate_audio()
             return
+        if self._uses_mobile_text_stream():
+            self._handle_mobile_text_stream_events(events)
+            return
         if self._uses_ime_composition():
             self._handle_ime_asr_events(events)
             return
@@ -949,6 +981,28 @@ class DesktopVoiceThread(threading.Thread):
         if len(new_text) + 2 < len(old):
             return old
         return new_text
+
+    def _uses_mobile_text_stream(self) -> bool:
+        return self.config["engine"] == "sherpa_onnx"
+
+    def _handle_mobile_text_stream_events(self, events: list[ASREvent]) -> None:
+        for event in events:
+            if event.type == "error":
+                self.set_error(event.error or event.text or "ASR engine error")
+                continue
+            if event.type == "partial":
+                self.pending_partial_text = event.text
+                self.session.sync_state(
+                    append_recognized_text(self.committed_text, self.pending_partial_text),
+                    self.settings,
+                )
+                continue
+            if event.type == "final":
+                final_text = event.text or self.pending_partial_text
+                self.pending_partial_text = ""
+                if final_text:
+                    self.committed_text = append_recognized_text(self.committed_text, final_text)
+                    self.session.sync_state(self.committed_text, self.settings)
 
     def _uses_ime_composition(self) -> bool:
         return self.config["engine"] == "funasr" and self.config.get("funasrMode") in {
@@ -1337,6 +1391,9 @@ class DesktopApi:
         self.input_gate_hotkey_config = load_input_gate_hotkey()
         self.input_gate_mode = load_input_gate_mode()
         self.tap_voice_active = False
+        self.auto_voice_pressed_at: float | None = None
+        self.auto_voice_latched = False
+        self.auto_voice_state = "ready"
         self.desktop_voice_config = normalize_desktop_voice_config(None)
         self.desktop_voice_settings = bridge_settings_from_desktop_config(self.desktop_voice_config)
         self.window: webview.Window | None = None
@@ -1363,12 +1420,50 @@ class DesktopApi:
             and not self.desktop_voice_thread.stop_event.is_set()
         )
 
+    def _desktop_onnx_enabled(self) -> bool:
+        thread = self.desktop_voice_thread
+        return (
+            thread is not None
+            and thread.config.get("engine") == "sherpa_onnx"
+            and thread.error is None
+            and not thread.stop_event.is_set()
+        )
+
+    def _mobile_input_blocked(self) -> bool:
+        with self.lock:
+            return self._desktop_onnx_enabled()
+
+    def _desktop_onnx_snapshot(self) -> dict:
+        thread = self.desktop_voice_thread
+        if thread is None or thread.config.get("engine") != "sherpa_onnx":
+            return {
+                "enabled": False,
+                "running": False,
+                "paused": False,
+                "status": "READY",
+                "error": None,
+                "model": SHERPA_ONNX_MODEL_NAME,
+                "modelPath": str(desktop_sherpa_onnx_model_path()),
+            }
+        snapshot = thread.snapshot()
+        return {
+            "enabled": True,
+            "running": bool(snapshot.get("running")),
+            "paused": bool(snapshot.get("paused")),
+            "status": snapshot.get("status") or "READY",
+            "error": snapshot.get("error"),
+            "model": SHERPA_ONNX_MODEL_NAME,
+            "modelPath": snapshot.get("modelPath") or str(desktop_sherpa_onnx_model_path()),
+        }
+
     def _desktop_voice_settings_snapshot(self) -> dict:
         return dict(self.desktop_voice_config)
 
     def _desktop_voice_active_model_name(self) -> str:
         if self.desktop_voice_config["engine"] == "vosk":
             return "vosk"
+        if self.desktop_voice_config["engine"] == "sherpa_onnx":
+            return SHERPA_ONNX_MODEL_NAME
         if self.desktop_voice_config["engine"] == "baidu":
             return f"baidu-dev-pid-{self.desktop_voice_config.get('baiduDevPid', DEFAULT_BAIDU_DEV_PID)}"
         if self.desktop_voice_config["funasrMode"] in {"streaming", "candidate_streaming"}:
@@ -1419,6 +1514,9 @@ class DesktopApi:
                 "inputGate": self.input_gate.snapshot(),
                 "inputGateMode": self.input_gate_mode,
                 "tapVoiceActive": self.tap_voice_active,
+                "autoVoiceState": self.auto_voice_state,
+                "desktopOnnxVoice": self._desktop_onnx_snapshot(),
+                "activeInputSource": "desktop_onnx" if self._desktop_onnx_enabled() else "mobile",
                 "inputGateHotkey": {
                     "registered": self.input_gate_hotkey_thread is not None and self.input_gate_hotkey_thread.error is None,
                     "error": self.input_gate_hotkey_thread.error if self.input_gate_hotkey_thread is not None else None,
@@ -1467,6 +1565,7 @@ class DesktopApi:
             self.typing_stats,
             self.input_gate,
             self._handle_phone_voice_hold_state,
+            self._mobile_input_blocked,
         )
         self.server_thread = thread
         thread.start()
@@ -1699,7 +1798,7 @@ class DesktopApi:
         return self._result(f"Hotkey set to {config['label']}.")
 
     def set_input_gate_mode(self, mode: str) -> dict:
-        if mode not in {"pause", "voice_hold", "tap_voice"}:
+        if mode not in INPUT_GATE_MODES:
             return self._result("Invalid input gate mode.")
         if mode == self.input_gate_mode:
             return self._result()
@@ -1717,7 +1816,41 @@ class DesktopApi:
             return False
         return thread.send_phone_control("voice_hold_start" if pressed else "voice_hold_stop")
 
+    def _reset_auto_voice_state(self) -> None:
+        with self.lock:
+            self.auto_voice_pressed_at = None
+            self.auto_voice_latched = False
+            self.auto_voice_state = "ready"
+
+    def _voice_control_start(self) -> bool:
+        with self.lock:
+            use_desktop_onnx = self._desktop_onnx_enabled()
+        if use_desktop_onnx:
+            result = self.resume_desktop_onnx_voice()
+            return not str(result.get("message", "")).startswith("Failed")
+        return self._send_voice_hold(True)
+
+    def _voice_control_stop(self) -> bool:
+        with self.lock:
+            use_desktop_onnx = self._desktop_onnx_enabled()
+        if use_desktop_onnx:
+            self.pause_desktop_onnx_voice()
+            return True
+        return self._send_voice_hold(False)
+
+    def _voice_hold_press(self) -> None:
+        self._voice_control_start()
+
+    def _voice_hold_release(self) -> None:
+        self._voice_control_stop()
+
     def toggle_tap_voice(self) -> dict:
+        with self.lock:
+            use_desktop_onnx = self._desktop_onnx_enabled()
+            thread = self.desktop_voice_thread
+            onnx_paused = bool(thread.pause_event.is_set()) if use_desktop_onnx and thread is not None else False
+        if use_desktop_onnx:
+            return self.resume_desktop_onnx_voice() if onnx_paused else self.pause_desktop_onnx_voice()
         if self.tap_voice_active:
             self._send_voice_hold(False)
             self.tap_voice_active = False
@@ -1726,15 +1859,77 @@ class DesktopApi:
         self.tap_voice_active = started
         return self._result("Tap Voice active." if started else "No phone is connected.")
 
+    def _auto_voice_press(self) -> None:
+        should_stop = False
+        should_start = False
+        with self.lock:
+            if self.input_gate_mode != "auto_voice":
+                return
+            if self.auto_voice_latched:
+                self.auto_voice_latched = False
+                self.auto_voice_pressed_at = None
+                self.auto_voice_state = "ready"
+                should_stop = True
+            elif self.auto_voice_pressed_at is None:
+                self.auto_voice_pressed_at = time.monotonic()
+                self.auto_voice_state = "holding"
+                should_start = True
+        if should_stop:
+            self._voice_control_stop()
+            return
+        if should_start and not self._voice_control_start():
+            with self.lock:
+                if self.input_gate_mode == "auto_voice":
+                    self.auto_voice_pressed_at = None
+                    self.auto_voice_latched = False
+                    self.auto_voice_state = "ready"
+
+    def _auto_voice_release(self) -> None:
+        should_stop = False
+        with self.lock:
+            if self.input_gate_mode != "auto_voice" or self.auto_voice_pressed_at is None:
+                return
+            duration = time.monotonic() - self.auto_voice_pressed_at
+            self.auto_voice_pressed_at = None
+            if duration < AUTO_VOICE_TAP_THRESHOLD_SECONDS:
+                self.auto_voice_latched = True
+                self.auto_voice_state = "tap_active"
+            else:
+                self.auto_voice_latched = False
+                self.auto_voice_state = "ready"
+                should_stop = True
+        if should_stop:
+            self._voice_control_stop()
+
     def _handle_phone_voice_hold_state(self, active: bool, reason: str) -> None:
         with self.lock:
-            self.tap_voice_active = bool(active) if self.input_gate_mode == "tap_voice" else False
+            if self.input_gate_mode == "tap_voice":
+                self.tap_voice_active = bool(active)
+            else:
+                self.tap_voice_active = False
+            if self.input_gate_mode == "auto_voice":
+                if active:
+                    self.auto_voice_state = "tap_active" if self.auto_voice_latched else "holding"
+                else:
+                    self.auto_voice_pressed_at = None
+                    self.auto_voice_latched = False
+                    self.auto_voice_state = "ready"
+            elif not active:
+                self.auto_voice_pressed_at = None
+                self.auto_voice_latched = False
+                self.auto_voice_state = "ready"
         log(f"[phone-control] voice hold active={active} reason={reason}")
 
     def _release_tap_voice(self) -> None:
+        should_release_auto = self.auto_voice_state != "ready" or self.auto_voice_pressed_at is not None or self.auto_voice_latched
         if self.tap_voice_active:
             self._send_voice_hold(False)
-            self.tap_voice_active = False
+        if should_release_auto:
+            self._voice_control_stop()
+        self.tap_voice_active = False
+        self.auto_voice_pressed_at = None
+        self.auto_voice_latched = False
+        self.auto_voice_state = "ready"
 
     def _stop_input_gate_hotkey(self) -> None:
         thread = self.input_gate_hotkey_thread
@@ -1744,6 +1939,8 @@ class DesktopApi:
             self.input_gate_hotkey_thread = None
 
     def toggle_input_pause(self) -> dict:
+        if self._desktop_onnx_enabled():
+            return self.toggle_desktop_onnx_pause()
         paused = self.input_gate.toggle()
         if not paused:
             thread = self.desktop_voice_thread
@@ -1753,6 +1950,8 @@ class DesktopApi:
         return self._result("Input paused." if paused else "Input resumed.")
 
     def set_input_pause(self, value: bool) -> dict:
+        if self._desktop_onnx_enabled():
+            return self.pause_desktop_onnx_voice() if bool(value) else self.resume_desktop_onnx_voice()
         paused = self.input_gate.set_paused(bool(value))
         if not paused:
             thread = self.desktop_voice_thread
@@ -1821,6 +2020,56 @@ class DesktopApi:
                 return self._result(f"Failed to start desktop voice: {thread.error}")
             return self._result("Desktop voice started.")
 
+    def start_desktop_onnx_voice(self) -> dict:
+        with self.lock:
+            if self._desktop_onnx_enabled():
+                thread = self.desktop_voice_thread
+                if thread is not None and thread.pause_event.is_set():
+                    thread.resume()
+                    self.show_input_gate_toast(False)
+                    return self._result("Desktop ONNX voice resumed.")
+                return self._result("Desktop ONNX voice is already listening.")
+            self._release_tap_voice()
+            if self.desktop_voice_thread is not None:
+                old_thread = self.desktop_voice_thread
+                self.desktop_voice_thread = None
+            else:
+                old_thread = None
+        if old_thread is not None:
+            old_thread.stop()
+            old_thread.join(timeout=2)
+
+        with self.lock:
+            self.desktop_voice_config = normalize_desktop_voice_config(
+                {
+                    **self.desktop_voice_config,
+                    "punctuationStrategy": "none",
+                    "voiceCommands": True,
+                }
+            )
+            self.desktop_voice_config["engine"] = "sherpa_onnx"
+            self.desktop_voice_config["punctuationStrategy"] = "none"
+            self.desktop_voice_config["voiceCommands"] = True
+            self.desktop_voice_settings = bridge_settings_from_desktop_config(self.desktop_voice_config)
+            thread = DesktopVoiceThread(
+                desktop_sherpa_onnx_model_path(),
+                self.desktop_voice_settings,
+                self.desktop_voice_config,
+                self.typing_stats,
+                None,
+            )
+            self.desktop_voice_thread = thread
+            thread.start()
+
+        thread.ready.wait(timeout=8)
+
+        with self.lock:
+            if thread.error:
+                self.desktop_voice_thread = None
+                return self._result(f"Failed to start desktop ONNX voice: {thread.error}")
+            self.show_input_gate_toast(False)
+            return self._result("Desktop ONNX voice started. Mobile input is blocked.")
+
     def stop_desktop_voice(self) -> dict:
         with self.lock:
             thread = self.desktop_voice_thread
@@ -1829,6 +2078,18 @@ class DesktopApi:
             thread.stop()
             thread.join(timeout=2)
         return self._result("Desktop voice stopped.")
+
+    def stop_desktop_onnx_voice(self) -> dict:
+        self._reset_auto_voice_state()
+        with self.lock:
+            thread = self.desktop_voice_thread
+            if thread is None or thread.config.get("engine") != "sherpa_onnx":
+                return self._result("Desktop ONNX voice is not running.")
+            self.desktop_voice_thread = None
+        thread.stop()
+        thread.join(timeout=2)
+        self.show_input_gate_toast(True)
+        return self._result("Desktop ONNX voice stopped. Mobile input is available.")
 
     def pause_desktop_voice(self) -> dict:
         with self.lock:
@@ -1845,6 +2106,35 @@ class DesktopApi:
                 return self._result("Desktop voice is not running.")
             thread.resume()
             return self._result("Desktop voice resumed.")
+
+    def pause_desktop_onnx_voice(self) -> dict:
+        self._reset_auto_voice_state()
+        with self.lock:
+            thread = self.desktop_voice_thread
+            if thread is None or thread.config.get("engine") != "sherpa_onnx" or not self._desktop_voice_running():
+                return self._result("Desktop ONNX voice is not running.")
+            thread.pause()
+        self.show_input_gate_toast(True)
+        return self._result("Desktop ONNX voice paused.")
+
+    def resume_desktop_onnx_voice(self) -> dict:
+        with self.lock:
+            thread = self.desktop_voice_thread
+            if thread is None or thread.config.get("engine") != "sherpa_onnx" or not self._desktop_voice_running():
+                return self.start_desktop_onnx_voice()
+            thread.resume()
+        self.show_input_gate_toast(False)
+        return self._result("Desktop ONNX voice resumed.")
+
+    def toggle_desktop_onnx_pause(self) -> dict:
+        with self.lock:
+            thread = self.desktop_voice_thread
+            if thread is None or thread.config.get("engine") != "sherpa_onnx" or not self._desktop_voice_running():
+                return self.start_desktop_onnx_voice()
+            paused = thread.pause_event.is_set()
+        if paused:
+            return self.resume_desktop_onnx_voice()
+        return self.pause_desktop_onnx_voice()
 
     def set_desktop_voice_settings(self, value: dict) -> dict:
         with self.lock:
@@ -1943,8 +2233,16 @@ class DesktopApi:
             hotkey = self.input_gate_hotkey_config
             if self.input_gate_mode == "voice_hold":
                 thread = HoldHotkeyThread(
-                    lambda: self._send_voice_hold(True),
-                    lambda: self._send_voice_hold(False),
+                    self._voice_hold_press,
+                    self._voice_hold_release,
+                    virtual_key=hotkey["virtual_key"],
+                    modifiers=hotkey["modifiers"],
+                    label=hotkey["label"],
+                )
+            elif self.input_gate_mode == "auto_voice":
+                thread = HoldHotkeyThread(
+                    self._auto_voice_press,
+                    self._auto_voice_release,
                     virtual_key=hotkey["virtual_key"],
                     modifiers=hotkey["modifiers"],
                     label=hotkey["label"],
