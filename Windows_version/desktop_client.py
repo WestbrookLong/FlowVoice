@@ -33,6 +33,7 @@ from input_gate import InputGate
 from server import BridgeSettings, FlowInputSession, PhoneControlHub, create_app, get_lan_ip, log, render_text, send_backspace_chunks, type_text
 from text_agent import TextAgentManager
 from typing_stats import TypingStats
+from voice_ask import VoiceAskManager
 
 
 DESKTOP_VOICE_MODEL_NAME = "vosk-model-small-cn-0.22"
@@ -51,6 +52,8 @@ DESKTOP_VOICE_DEFAULT_CONFIG = {
 VALID_DESKTOP_VOICE_ENGINES = {"vosk", "funasr", "baidu", "sherpa_onnx"}
 INPUT_GATE_HOTKEY_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "input_gate_hotkey.json"
 INPUT_GATE_MODE_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "input_gate_mode.json"
+VOICE_ASK_HOTKEY_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "voice_ask_hotkey.json"
+VOICE_ASK_CONFIG_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "voice_ask_config.json"
 CLOUDFLARED_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "cloudflared.exe"
 CLOUDFLARED_DOWNLOAD_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
 CLOUDFLARE_TUNNEL_URL_PATTERN = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
@@ -60,6 +63,12 @@ DEFAULT_INPUT_GATE_HOTKEY = {
     "label": "Alt+M",
 }
 INPUT_GATE_MODES = {"pause", "voice_hold", "tap_voice", "auto_voice"}
+DEFAULT_VOICE_ASK_HOTKEY = {
+    "virtual_key": 0x41,
+    "modifiers": 0x0003,
+    "label": "Ctrl+Alt+A",
+}
+VOICE_ASK_MODES = {"pause", "voice_hold", "tap_voice", "auto_voice"}
 AUTO_VOICE_TAP_THRESHOLD_SECONDS = 0.3
 VK_NAME_TO_CODE = {
     "BACKSPACE": 0x08,
@@ -344,6 +353,44 @@ def save_input_gate_mode(mode: str) -> None:
     INPUT_GATE_MODE_PATH.write_text(json.dumps({"mode": mode}, indent=2), encoding="utf-8")
 
 
+def load_voice_ask_config() -> dict:
+    default = {"enabled": True, "mode": "tap_voice", "model": "qwen-plus", "apiKey": ""}
+    try:
+        if VOICE_ASK_CONFIG_PATH.exists():
+            payload = json.loads(VOICE_ASK_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                mode = payload.get("mode")
+                model = str(payload.get("model", default["model"])).strip()
+                return {
+                    "enabled": bool(payload.get("enabled", True)),
+                    "mode": mode if mode in VOICE_ASK_MODES else default["mode"],
+                    "model": model or default["model"],
+                    "apiKey": str(payload.get("apiKey", "")).strip(),
+                }
+    except Exception as exc:
+        log(f"[voice-ask] failed to load config: {exc}")
+    return default
+
+
+def save_voice_ask_config(config: dict) -> None:
+    VOICE_ASK_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    VOICE_ASK_CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_voice_ask_hotkey() -> dict:
+    try:
+        if VOICE_ASK_HOTKEY_PATH.exists():
+            return normalize_input_gate_hotkey(json.loads(VOICE_ASK_HOTKEY_PATH.read_text(encoding="utf-8")))
+    except Exception as exc:
+        log(f"[voice-ask] failed to load hotkey config: {exc}")
+    return dict(DEFAULT_VOICE_ASK_HOTKEY)
+
+
+def save_voice_ask_hotkey(config: dict) -> None:
+    VOICE_ASK_HOTKEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    VOICE_ASK_HOTKEY_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def bridge_settings_from_desktop_config(config: dict) -> BridgeSettings:
     use_spoken_punctuation = config.get("punctuationStrategy") == "spoken"
     return BridgeSettings(
@@ -432,6 +479,7 @@ class BridgeServerThread(threading.Thread):
         text_agent: TextAgentManager | None = None,
         typing_stats: TypingStats | None = None,
         input_gate: InputGate | None = None,
+        voice_ask: VoiceAskManager | None = None,
         voice_hold_state_callback=None,
         mobile_input_blocked_callback=None,
     ) -> None:
@@ -442,6 +490,7 @@ class BridgeServerThread(threading.Thread):
         self.text_agent = text_agent
         self.typing_stats = typing_stats
         self.input_gate = input_gate
+        self.voice_ask = voice_ask
         self.voice_hold_state_callback = voice_hold_state_callback
         self.mobile_input_blocked_callback = mobile_input_blocked_callback
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -470,6 +519,7 @@ class BridgeServerThread(threading.Thread):
             text_agent=self.text_agent,
             typing_stats=self.typing_stats,
             input_gate=self.input_gate,
+            voice_ask=self.voice_ask,
             phone_control=self.phone_control,
             voice_hold_state_callback=self.voice_hold_state_callback,
             mobile_input_blocked_callback=self.mobile_input_blocked_callback,
@@ -676,6 +726,7 @@ class DesktopVoiceThread(threading.Thread):
         config: dict,
         typing_stats: TypingStats | None = None,
         input_gate: InputGate | None = None,
+        voice_ask: VoiceAskManager | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.model_path = model_path
@@ -683,6 +734,7 @@ class DesktopVoiceThread(threading.Thread):
         self.config = normalize_desktop_voice_config(config)
         self.typing_stats = typing_stats
         self.input_gate = input_gate
+        self.voice_ask = voice_ask
         self.session = self._create_input_session()
         self.asr_engine: StreamingASREngine | None = None
         self.punctuation_engine: PunctuationEngine | None = None
@@ -1206,9 +1258,10 @@ class DesktopVoiceThread(threading.Thread):
 
     def _create_input_session(self) -> FlowInputSession:
         try:
-            return FlowInputSession(self._record_inserted_text)
+            session = FlowInputSession(self._record_inserted_text)
         except TypeError:
-            return FlowInputSession()
+            session = FlowInputSession()
+        return session
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -1390,6 +1443,21 @@ class DesktopApi:
         self.input_gate_hotkey_thread: TextAgentHotkeyThread | None = None
         self.input_gate_hotkey_config = load_input_gate_hotkey()
         self.input_gate_mode = load_input_gate_mode()
+        voice_ask_config = load_voice_ask_config()
+        self.voice_ask = VoiceAskManager(
+            model=voice_ask_config["model"],
+            api_key=voice_ask_config["apiKey"],
+            on_strip_state=self._handle_voice_ask_strip_state,
+            on_result_state=self._handle_voice_ask_result_state,
+        )
+        self.voice_ask.set_enabled(voice_ask_config["enabled"])
+        self.voice_ask_mode = voice_ask_config["mode"]
+        self.voice_ask_hotkey_config = load_voice_ask_hotkey()
+        self.voice_ask_hotkey_thread: TextAgentHotkeyThread | None = None
+        self.voice_ask_tap_active = False
+        self.voice_ask_auto_pressed_at: float | None = None
+        self.voice_ask_auto_latched = False
+        self.voice_ask_auto_state = "ready"
         self.tap_voice_active = False
         self.auto_voice_pressed_at: float | None = None
         self.auto_voice_latched = False
@@ -1399,8 +1467,13 @@ class DesktopApi:
         self.window: webview.Window | None = None
         self.agent_window: webview.Window | None = None
         self.input_toast_window = None
+        self.voice_ask_strip_window = None
+        self.voice_ask_result_window = None
+        self.voice_ask_result_window_error: str | None = None
         self._agent_render = None
         self._input_toast_show = None
+        self._voice_ask_strip_render = None
+        self._voice_ask_result_render = None
         self.maximized = False
 
     def _url(self) -> str:
@@ -1522,6 +1595,19 @@ class DesktopApi:
                     "error": self.input_gate_hotkey_thread.error if self.input_gate_hotkey_thread is not None else None,
                     "label": self.input_gate_hotkey_config["label"],
                 },
+                "voiceAsk": {
+                    **self.voice_ask.snapshot(),
+                    "resultWindowReady": self.voice_ask_result_window is not None,
+                    "resultWindowError": self.voice_ask_result_window_error,
+                },
+                "voiceAskMode": self.voice_ask_mode,
+                "voiceAskTapActive": self.voice_ask_tap_active,
+                "voiceAskAutoState": self.voice_ask_auto_state,
+                "voiceAskHotkey": {
+                    "registered": self.voice_ask_hotkey_thread is not None and self.voice_ask_hotkey_thread.error is None,
+                    "error": self.voice_ask_hotkey_thread.error if self.voice_ask_hotkey_thread is not None else None,
+                    "label": self.voice_ask_hotkey_config["label"],
+                },
                 "typingStats": self.typing_stats.snapshot(),
             }
 
@@ -1564,6 +1650,7 @@ class DesktopApi:
             self.text_agent,
             self.typing_stats,
             self.input_gate,
+            self.voice_ask,
             self._handle_phone_voice_hold_state,
             self._mobile_input_blocked,
         )
@@ -1767,11 +1854,225 @@ class DesktopApi:
             self.window.restore()
         return self._result()
 
+    def _save_voice_ask_config(self) -> None:
+        save_voice_ask_config(
+            {
+                "enabled": self.voice_ask.snapshot()["enabled"],
+                "mode": self.voice_ask_mode,
+                "model": self.voice_ask.snapshot()["model"],
+                "apiKey": self.voice_ask.api_key,
+            }
+        )
+
+    def set_voice_ask_enabled(self, enabled: bool) -> dict:
+        was_enabled = self.voice_ask.snapshot()["enabled"]
+        if not enabled:
+            self._voice_ask_cancel()
+        self.voice_ask.set_enabled(bool(enabled))
+        if not enabled:
+            self._stop_voice_ask_hotkey()
+        elif not was_enabled:
+            self.start_hotkeys()
+        self._save_voice_ask_config()
+        return self._result("Voice Ask enabled." if enabled else "Voice Ask disabled.")
+
+    def set_voice_ask_model(self, model: str) -> dict:
+        try:
+            self.voice_ask.set_model(model)
+        except Exception as exc:
+            return self._result(str(exc))
+        self._save_voice_ask_config()
+        return self._result("Voice Ask model updated.")
+
+    def set_voice_ask_api_key(self, api_key: str) -> dict:
+        self.voice_ask.set_api_key(api_key)
+        self._save_voice_ask_config()
+        return self._result("Voice Ask API key saved locally." if str(api_key).strip() else "Voice Ask API key cleared.")
+
+    @staticmethod
+    def _same_hotkey(left: dict, right: dict) -> bool:
+        return (
+            int(left.get("virtual_key", -1)) == int(right.get("virtual_key", -2))
+            and int(left.get("modifiers", -1)) == int(right.get("modifiers", -2))
+        )
+
+    def set_voice_ask_hotkey(self, payload: dict) -> dict:
+        try:
+            config = normalize_input_gate_hotkey(payload)
+        except Exception as exc:
+            return self._result(f"Invalid hotkey: {exc}")
+        if self._same_hotkey(config, self.input_gate_hotkey_config):
+            return self._result("Voice Ask and Input Gate must use different hotkeys.")
+
+        previous_config = dict(self.voice_ask_hotkey_config)
+        self._stop_voice_ask_hotkey()
+        self.voice_ask_hotkey_config = config
+        self.start_hotkeys()
+        thread = self.voice_ask_hotkey_thread
+        if thread is None or thread.error is not None:
+            error = thread.error if thread is not None else "Hotkey registration failed."
+            self._stop_voice_ask_hotkey()
+            self.voice_ask_hotkey_config = previous_config
+            self.start_hotkeys()
+            return self._result(f"Hotkey unavailable: {error}")
+        save_voice_ask_hotkey(config)
+        return self._result(f"Voice Ask hotkey set to {config['label']}.")
+
+    def set_voice_ask_mode(self, mode: str) -> dict:
+        if mode not in VOICE_ASK_MODES:
+            return self._result("Invalid Voice Ask mode.")
+        if mode == self.voice_ask_mode:
+            return self._result()
+        self._stop_voice_ask_hotkey()
+        self._voice_ask_cancel()
+        self.voice_ask_mode = mode
+        self._save_voice_ask_config()
+        self.start_hotkeys()
+        return self._result("Voice Ask mode updated.")
+
+    def _voice_ask_source(self) -> str:
+        return "desktop" if self._desktop_onnx_enabled() else "mobile"
+
+    def _voice_ask_begin(self, *, control_voice: bool) -> bool:
+        if self.voice_ask.snapshot()["status"] == "listening":
+            return True
+        if self._voice_ask_strip_render is None:
+            log("[voice-ask] input window is not ready")
+            return False
+        target_hwnd = int(ctypes.WinDLL("user32", use_last_error=True).GetForegroundWindow() or 0)
+        try:
+            self.voice_ask.start(source=self._voice_ask_source(), target_hwnd=target_hwnd)
+        except Exception as exc:
+            log(f"[voice-ask] start failed: {exc}")
+            return False
+        if control_voice and not self._voice_control_start():
+            self.voice_ask.cancel_listening()
+            return False
+        return True
+
+    def _voice_ask_submit(self, *, control_voice: bool) -> None:
+        if self.voice_ask.snapshot()["status"] != "listening":
+            return
+        if control_voice:
+            self._voice_control_stop()
+        self.voice_ask.stop_and_submit()
+        self.voice_ask_tap_active = False
+        self.voice_ask_auto_pressed_at = None
+        self.voice_ask_auto_latched = False
+        self.voice_ask_auto_state = "ready"
+
+    def _voice_ask_cancel(self) -> None:
+        active = self.voice_ask.snapshot()["status"] == "listening"
+        if active and self.voice_ask_mode != "pause":
+            self._voice_control_stop()
+        self.voice_ask.cancel_listening()
+        self.voice_ask_tap_active = False
+        self.voice_ask_auto_pressed_at = None
+        self.voice_ask_auto_latched = False
+        self.voice_ask_auto_state = "ready"
+
+    def toggle_voice_ask_capture(self) -> dict:
+        if self.voice_ask.snapshot()["status"] == "listening":
+            self._voice_ask_submit(control_voice=False)
+            return self._result("Voice Ask submitted.")
+        started = self._voice_ask_begin(control_voice=False)
+        return self._result("Voice Ask listening." if started else "Voice Ask could not start.")
+
+    def _voice_ask_hold_press(self) -> None:
+        self._voice_ask_begin(control_voice=True)
+
+    def _voice_ask_hold_release(self) -> None:
+        self._voice_ask_submit(control_voice=True)
+
+    def toggle_voice_ask_tap(self) -> dict:
+        if self.voice_ask.snapshot()["status"] == "listening":
+            self._voice_ask_submit(control_voice=True)
+            return self._result("Voice Ask submitted.")
+        started = self._voice_ask_begin(control_voice=True)
+        self.voice_ask_tap_active = started
+        return self._result("Voice Ask listening." if started else "No input source is available.")
+
+    def _voice_ask_auto_press(self) -> None:
+        if self.voice_ask_auto_latched:
+            self.voice_ask_auto_latched = False
+            self.voice_ask_auto_pressed_at = None
+            self.voice_ask_auto_state = "ready"
+            self._voice_ask_submit(control_voice=True)
+            return
+        if self.voice_ask_auto_pressed_at is not None:
+            return
+        self.voice_ask_auto_pressed_at = time.monotonic()
+        self.voice_ask_auto_state = "holding"
+        if not self._voice_ask_begin(control_voice=True):
+            self.voice_ask_auto_pressed_at = None
+            self.voice_ask_auto_state = "ready"
+
+    def _voice_ask_auto_release(self) -> None:
+        pressed_at = self.voice_ask_auto_pressed_at
+        if pressed_at is None:
+            return
+        self.voice_ask_auto_pressed_at = None
+        if time.monotonic() - pressed_at < AUTO_VOICE_TAP_THRESHOLD_SECONDS:
+            self.voice_ask_auto_latched = True
+            self.voice_ask_auto_state = "tap_active"
+            return
+        self.voice_ask_auto_latched = False
+        self.voice_ask_auto_state = "ready"
+        self._voice_ask_submit(control_voice=True)
+
+    def _handle_voice_ask_strip_state(self, snapshot: dict) -> None:
+        render = self._voice_ask_strip_render
+        if render is not None:
+            render(snapshot)
+
+    def _handle_voice_ask_result_state(self, snapshot: dict) -> None:
+        render = self._voice_ask_result_render
+        if render is not None:
+            try:
+                render(snapshot)
+                self.voice_ask_result_window_error = None
+            except Exception as exc:
+                self.voice_ask_result_window_error = str(exc)
+                log(f"[voice-ask] result window render failed: {exc}\n{traceback.format_exc()}")
+
+    def dismiss_voice_ask_result(self) -> dict:
+        self.voice_ask.dismiss_result()
+        return self._result()
+
+    def cancel_voice_ask_result(self) -> dict:
+        target_hwnd = self.voice_ask.target_window()
+        self.voice_ask.dismiss_result()
+        if target_hwnd:
+            ctypes.WinDLL("user32", use_last_error=True).SetForegroundWindow(ctypes.c_void_p(target_hwnd))
+        return self._result()
+
+    def accept_voice_ask_result(self) -> dict:
+        answer, target_hwnd = self.voice_ask.result_for_insertion()
+        if not answer:
+            return self._result("Voice Ask answer is not ready.")
+        copy_text_to_clipboard(answer)
+        if target_hwnd:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.SetForegroundWindow(ctypes.c_void_p(target_hwnd))
+            time.sleep(0.05)
+        type_text(answer)
+        copy_text_to_clipboard(answer)
+        return self._result("Voice Ask answer inserted.")
+
+    def copy_voice_ask_result(self) -> dict:
+        answer = self.voice_ask.result_for_copy()
+        if not answer:
+            return self._result("Voice Ask answer is not ready.")
+        copy_text_to_clipboard(answer)
+        return self._result("Voice Ask answer copied.")
+
     def set_input_gate_hotkey(self, payload: dict) -> dict:
         try:
             config = normalize_input_gate_hotkey(payload)
         except Exception as exc:
             return self._result(f"Invalid hotkey: {exc}")
+        if self._same_hotkey(config, self.voice_ask_hotkey_config):
+            return self._result("Input Gate and Voice Ask must use different hotkeys.")
 
         self._release_tap_voice()
         previous_config = dict(self.input_gate_hotkey_config)
@@ -1902,6 +2203,7 @@ class DesktopApi:
             self._voice_control_stop()
 
     def _handle_phone_voice_hold_state(self, active: bool, reason: str) -> None:
+        submit_voice_ask = False
         with self.lock:
             if self.input_gate_mode == "tap_voice":
                 self.tap_voice_active = bool(active)
@@ -1918,7 +2220,13 @@ class DesktopApi:
                 self.auto_voice_pressed_at = None
                 self.auto_voice_latched = False
                 self.auto_voice_state = "ready"
+            voice_ask_state = self.voice_ask.snapshot()
+            if voice_ask_state["status"] == "listening" and voice_ask_state["source"] == "mobile":
+                self.voice_ask_tap_active = bool(active)
+                submit_voice_ask = not active
         log(f"[phone-control] voice hold active={active} reason={reason}")
+        if submit_voice_ask:
+            self._voice_ask_submit(control_voice=False)
 
     def _release_tap_voice(self) -> None:
         should_release_auto = self.auto_voice_state != "ready" or self.auto_voice_pressed_at is not None or self.auto_voice_latched
@@ -1937,6 +2245,13 @@ class DesktopApi:
             thread.stop()
             thread.join(timeout=2)
             self.input_gate_hotkey_thread = None
+
+    def _stop_voice_ask_hotkey(self) -> None:
+        thread = self.voice_ask_hotkey_thread
+        if thread is not None:
+            thread.stop()
+            thread.join(timeout=2)
+            self.voice_ask_hotkey_thread = None
 
     def toggle_input_pause(self) -> dict:
         if self._desktop_onnx_enabled():
@@ -2009,6 +2324,7 @@ class DesktopApi:
                 self.desktop_voice_config,
                 self.typing_stats,
                 self.input_gate,
+                self.voice_ask,
             )
             self.desktop_voice_thread = thread
             thread.start()
@@ -2057,6 +2373,7 @@ class DesktopApi:
                 self.desktop_voice_config,
                 self.typing_stats,
                 None,
+                self.voice_ask,
             )
             self.desktop_voice_thread = thread
             thread.start()
@@ -2192,6 +2509,7 @@ class DesktopApi:
         return state
 
     def shutdown(self) -> None:
+        self._voice_ask_cancel()
         self._release_tap_voice()
         if self.agent_window is not None:
             try:
@@ -2217,12 +2535,27 @@ class DesktopApi:
             except Exception:
                 pass
             self.input_toast_window = None
+        for attribute in ("voice_ask_strip_window", "voice_ask_result_window"):
+            native_window = getattr(self, attribute, None)
+            if native_window is None:
+                continue
+            try:
+                if getattr(native_window, "InvokeRequired", False):
+                    from System import Action
+
+                    native_window.BeginInvoke(Action(native_window.Close))
+                else:
+                    native_window.Close()
+            except Exception:
+                pass
+            setattr(self, attribute, None)
         if self.text_agent_hotkey_thread is not None:
             self.text_agent_hotkey_thread.stop()
             self.text_agent_hotkey_thread.join(timeout=2)
             self.text_agent_hotkey_thread = None
         if self.input_gate_hotkey_thread is not None:
             self._stop_input_gate_hotkey()
+        self._stop_voice_ask_hotkey()
         self.cloudflare_tunnel.stop()
         self.stop_desktop_voice()
         self.stop_service()
@@ -2269,6 +2602,46 @@ class DesktopApi:
             thread.ready.wait(timeout=2)
             if thread.error:
                 log(f"[input-gate] hotkey unavailable: {thread.error}")
+        if self.voice_ask_hotkey_thread is None and self.voice_ask.snapshot()["enabled"]:
+            hotkey = self.voice_ask_hotkey_config
+            if self.voice_ask_mode == "voice_hold":
+                thread = HoldHotkeyThread(
+                    self._voice_ask_hold_press,
+                    self._voice_ask_hold_release,
+                    virtual_key=hotkey["virtual_key"],
+                    modifiers=hotkey["modifiers"],
+                    label=hotkey["label"],
+                )
+            elif self.voice_ask_mode == "auto_voice":
+                thread = HoldHotkeyThread(
+                    self._voice_ask_auto_press,
+                    self._voice_ask_auto_release,
+                    virtual_key=hotkey["virtual_key"],
+                    modifiers=hotkey["modifiers"],
+                    label=hotkey["label"],
+                )
+            elif hotkey["modifiers"] == 0:
+                callback = self.toggle_voice_ask_tap if self.voice_ask_mode == "tap_voice" else self.toggle_voice_ask_capture
+                thread = HoldHotkeyThread(
+                    callback,
+                    lambda: None,
+                    virtual_key=hotkey["virtual_key"],
+                    modifiers=0,
+                    label=hotkey["label"],
+                )
+            else:
+                thread = TextAgentHotkeyThread(
+                    self.toggle_voice_ask_tap if self.voice_ask_mode == "tap_voice" else self.toggle_voice_ask_capture,
+                    hotkey_id=0x4644,
+                    virtual_key=hotkey["virtual_key"],
+                    modifiers=hotkey["modifiers"],
+                    label=hotkey["label"],
+                )
+            self.voice_ask_hotkey_thread = thread
+            thread.start()
+            thread.ready.wait(timeout=2)
+            if thread.error:
+                log(f"[voice-ask] hotkey unavailable: {thread.error}")
 
 
 def apply_window_chrome(window: webview.Window) -> None:
@@ -2711,6 +3084,297 @@ def create_native_input_gate_toast(api: DesktopApi) -> object:
     return form
 
 
+def create_native_voice_ask_strip(api: DesktopApi) -> object:
+    import clr
+
+    clr.AddReference("System.Drawing")
+    clr.AddReference("System.Windows.Forms")
+    from System import Action
+    from System.Drawing import Color, Font, FontStyle, Point, Region, Size
+    from System.Drawing.Drawing2D import GraphicsPath
+    from System.Windows.Forms import BorderStyle, Form, FormBorderStyle, FormStartPosition, Keys, Label, Screen, TextBox
+
+    form = Form()
+    form.Text = "FlowVoice Voice Ask"
+    form.ClientSize = Size(620, 66)
+    form.FormBorderStyle = getattr(FormBorderStyle, "None")
+    form.TopMost = True
+    form.ShowInTaskbar = False
+    form.StartPosition = FormStartPosition.Manual
+    form.BackColor = Color.FromArgb(18, 18, 18)
+    form.Opacity = 0.97
+
+    def rounded_region(width: int, height: int, radius: int) -> Region:
+        path = GraphicsPath()
+        diameter = radius * 2
+        path.AddArc(0, 0, diameter, diameter, 180, 90)
+        path.AddArc(width - diameter, 0, diameter, diameter, 270, 90)
+        path.AddArc(width - diameter, height - diameter, diameter, diameter, 0, 90)
+        path.AddArc(0, height - diameter, diameter, diameter, 90, 90)
+        path.CloseFigure()
+        try:
+            return Region(path)
+        finally:
+            path.Dispose()
+
+    form.Region = rounded_region(620, 66, 25)
+
+    status_label = Label()
+    status_label.Location = Point(22, 22)
+    status_label.Size = Size(92, 24)
+    status_label.Font = Font("Microsoft YaHei UI", 9, FontStyle.Bold)
+    status_label.ForeColor = Color.FromArgb(245, 245, 245)
+    status_label.Text = "LISTENING"
+    form.Controls.Add(status_label)
+
+    prompt_input = TextBox()
+    prompt_input.Location = Point(118, 18)
+    prompt_input.Size = Size(476, 30)
+    prompt_input.BorderStyle = getattr(BorderStyle, "None")
+    prompt_input.BackColor = Color.FromArgb(18, 18, 18)
+    prompt_input.ForeColor = Color.FromArgb(248, 248, 248)
+    prompt_input.Font = Font("Microsoft YaHei UI", 12, FontStyle.Regular)
+    prompt_input.Text = ""
+    form.Controls.Add(prompt_input)
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetWindowLongPtrW.restype = ctypes.c_void_p
+    user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+    WS_EX_TOOLWINDOW = 0x00000080
+    last_status = {"value": "hidden"}
+
+    def place() -> None:
+        area = Screen.PrimaryScreen.WorkingArea
+        form.Left = int(area.Left + (area.Width - form.Width) / 2)
+        form.Top = int(area.Bottom - form.Height - 28)
+
+    def on_text_changed(_sender, _event) -> None:
+        api.voice_ask.set_prompt(prompt_input.Text)
+
+    prompt_input.TextChanged += on_text_changed
+
+    def on_key_down(_sender, event) -> None:
+        if event.KeyCode != Keys.Enter:
+            return
+        event.SuppressKeyPress = True
+        if api.voice_ask.snapshot()["status"] == "completed":
+            api.copy_voice_ask_result()
+
+    prompt_input.KeyDown += on_key_down
+
+    def apply_snapshot(snapshot: dict) -> None:
+        status = str(snapshot.get("status") or "hidden")
+        if status == "hidden" or status == "idle":
+            form.Hide()
+            last_status["value"] = status
+            return
+        place()
+        if status == "listening":
+            status_label.Text = "LISTENING"
+            status_label.ForeColor = Color.FromArgb(248, 248, 248)
+            prompt_input.ReadOnly = False
+            if not form.Visible or last_status["value"] != "listening":
+                prompt_input.Text = str(snapshot.get("prompt") or "")
+                prompt_input.SelectionStart = len(prompt_input.Text)
+                prompt_input.SelectionLength = 0
+            if not form.Visible:
+                form.Show()
+            form.Activate()
+            prompt_input.Focus()
+        else:
+            status_label.Text = "THINKING" if status == "thinking" else "READY"
+            status_label.ForeColor = Color.FromArgb(185, 185, 185)
+            prompt_input.ReadOnly = True
+            if not form.Visible:
+                form.Show()
+        last_status["value"] = status
+
+    def render(snapshot: dict) -> None:
+        if form.IsDisposed:
+            return
+        if form.InvokeRequired:
+            form.Invoke(Action(lambda: apply_snapshot(snapshot)))
+        else:
+            apply_snapshot(snapshot)
+
+    form.Show()
+    hwnd = ctypes.c_void_p(form.Handle.ToInt64())
+    ex_style = int(user32.GetWindowLongPtrW(hwnd, -20) or 0)
+    user32.SetWindowLongPtrW(hwnd, -20, ctypes.c_void_p(ex_style | WS_EX_TOOLWINDOW))
+    form.Hide()
+    api._voice_ask_strip_render = render
+    return form
+
+
+def create_native_voice_ask_result(api: DesktopApi) -> object:
+    import clr
+
+    clr.AddReference("System.Drawing")
+    clr.AddReference("System.Windows.Forms")
+    from System import Action
+    from System.Drawing import Color, Font, FontStyle, Point, Size
+    from System.Windows.Forms import (
+        BorderStyle,
+        Form,
+        FormBorderStyle,
+        FormStartPosition,
+        Keys,
+        Label,
+        RichTextBox,
+        Screen,
+        Timer,
+    )
+
+    form = Form()
+    form.Text = "FlowVoice Voice Ask Result"
+    form.ClientSize = Size(720, 430)
+    form.FormBorderStyle = getattr(FormBorderStyle, "None")
+    form.TopMost = True
+    form.ShowInTaskbar = False
+    form.StartPosition = FormStartPosition.Manual
+    form.BackColor = Color.FromArgb(7, 15, 11)
+    form.KeyPreview = True
+
+    title = Label()
+    title.Location = Point(28, 22)
+    title.Size = Size(650, 28)
+    title.Font = Font("Microsoft YaHei UI", 14, FontStyle.Bold)
+    title.ForeColor = Color.FromArgb(40, 245, 141)
+    title.Text = "Voice Ask"
+    form.Controls.Add(title)
+
+    prompt = Label()
+    prompt.Location = Point(28, 58)
+    prompt.Size = Size(650, 42)
+    prompt.Font = Font("Microsoft YaHei UI", 9, FontStyle.Regular)
+    prompt.ForeColor = Color.FromArgb(126, 169, 142)
+    form.Controls.Add(prompt)
+
+    answer = RichTextBox()
+    answer.Location = Point(28, 112)
+    answer.Size = Size(664, 264)
+    answer.BorderStyle = getattr(BorderStyle, "None")
+    answer.ReadOnly = True
+    answer.BackColor = Color.FromArgb(10, 24, 17)
+    answer.ForeColor = Color.FromArgb(232, 255, 240)
+    answer.Font = Font("Microsoft YaHei UI", 11, FontStyle.Regular)
+    form.Controls.Add(answer)
+
+    hint = Label()
+    hint.Location = Point(28, 392)
+    hint.Size = Size(650, 22)
+    hint.Font = Font("Microsoft YaHei UI", 9, FontStyle.Regular)
+    hint.ForeColor = Color.FromArgb(103, 135, 114)
+    hint.Text = "Enter to insert  |  Esc or click elsewhere to close"
+    form.Controls.Add(hint)
+
+    closing_intentionally = {"value": False}
+    ignore_deactivate_until = {"value": 0.0}
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    SW_RESTORE = 9
+    HWND_TOPMOST = ctypes.c_void_p(-1)
+    SWP_NOMOVE = 0x0002
+    SWP_NOSIZE = 0x0001
+    SWP_SHOWWINDOW = 0x0040
+
+    def activate_result() -> None:
+        if not form.Visible:
+            return
+        hwnd = ctypes.c_void_p(form.Handle.ToInt64())
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        )
+        form.BringToFront()
+        form.Activate()
+        answer.Focus()
+
+    focus_timer = Timer()
+    focus_timer.Interval = 140
+
+    def retry_focus(_sender=None, _event=None) -> None:
+        focus_timer.Stop()
+        activate_result()
+
+    focus_timer.Tick += retry_focus
+
+    def place() -> None:
+        area = Screen.PrimaryScreen.WorkingArea
+        form.Left = int(area.Left + (area.Width - form.Width) / 2)
+        form.Top = int(area.Top + (area.Height - form.Height) / 2)
+
+    def hide_result(dismiss: bool, restore_target: bool = False) -> None:
+        focus_timer.Stop()
+        closing_intentionally["value"] = True
+        form.Hide()
+        closing_intentionally["value"] = False
+        if dismiss:
+            if restore_target:
+                api.cancel_voice_ask_result()
+            else:
+                api.dismiss_voice_ask_result()
+
+    def apply_snapshot(snapshot: dict) -> None:
+        status = snapshot.get("status")
+        if status not in {"thinking", "completed", "error"} or not snapshot.get("resultVisible"):
+            hide_result(False)
+            return
+        prompt.Text = str(snapshot.get("prompt") or "")[-180:]
+        if status == "thinking":
+            title.Text = "Voice Ask · Thinking"
+            answer.Text = "Thinking..."
+        elif status == "error":
+            title.Text = "Voice Ask · Error"
+            answer.Text = str(snapshot.get("error") or "Unknown error")
+        else:
+            title.Text = "Voice Ask · Answer"
+            answer.Text = str(snapshot.get("answer") or "")
+        place()
+        ignore_deactivate_until["value"] = time.monotonic() + 0.45
+        if not form.Visible:
+            form.Show()
+        activate_result()
+        focus_timer.Stop()
+        focus_timer.Start()
+
+    def render(snapshot: dict) -> None:
+        if form.IsDisposed:
+            return
+        if form.InvokeRequired:
+            form.BeginInvoke(Action(lambda: apply_snapshot(snapshot)))
+        else:
+            apply_snapshot(snapshot)
+
+    def on_key_down(_sender, event) -> None:
+        if event.KeyCode == Keys.Escape:
+            event.SuppressKeyPress = True
+            hide_result(True, restore_target=True)
+        elif event.KeyCode == Keys.Enter and api.voice_ask.snapshot()["status"] == "completed":
+            event.SuppressKeyPress = True
+            hide_result(False)
+            threading.Thread(target=api.accept_voice_ask_result, daemon=True).start()
+
+    def on_deactivate(_sender, _event) -> None:
+        if time.monotonic() < ignore_deactivate_until["value"]:
+            return
+        if form.Visible and not closing_intentionally["value"]:
+            hide_result(True)
+
+    form.KeyDown += on_key_down
+    answer.KeyDown += on_key_down
+    form.Deactivate += on_deactivate
+    form.FormClosed += lambda _sender, _event: focus_timer.Stop()
+    _ = form.Handle
+    api._voice_ask_result_render = render
+    return form
+
+
 def main() -> None:
     if sys.platform != "win32":
         raise SystemExit("This program injects text with Windows SendInput and must run on Windows.")
@@ -2775,10 +3439,40 @@ def main() -> None:
         except Exception as exc:
             log(f"[desktop] input toast window creation failed: {exc}")
 
+    def create_voice_ask_windows() -> None:
+        if api.voice_ask_strip_window is not None and api.voice_ask_result_window is not None:
+            return
+        try:
+            from System import Action
+
+            def create_on_ui_thread() -> None:
+                if api.voice_ask_strip_window is None:
+                    try:
+                        api.voice_ask_strip_window = create_native_voice_ask_strip(api)
+                        log("[desktop] Voice Ask input window ready")
+                    except Exception as exc:
+                        log(f"[desktop] Voice Ask input window failed: {exc}\n{traceback.format_exc()}")
+                if api.voice_ask_result_window is None:
+                    try:
+                        api.voice_ask_result_window = create_native_voice_ask_result(api)
+                        api.voice_ask_result_window_error = None
+                        log("[desktop] Voice Ask result window ready")
+                    except Exception as exc:
+                        api.voice_ask_result_window_error = str(exc)
+                        log(f"[desktop] Voice Ask result window failed: {exc}\n{traceback.format_exc()}")
+
+            if window.native.InvokeRequired:
+                window.native.BeginInvoke(Action(create_on_ui_thread))
+            else:
+                create_on_ui_thread()
+        except Exception as exc:
+            log(f"[desktop] Voice Ask window creation failed: {exc}")
+
     def on_main_window_loaded() -> None:
         log("[desktop] main window loaded")
         apply_window_chrome(window)
         threading.Timer(0.2, create_input_toast_window).start()
+        threading.Timer(0.35, create_voice_ask_windows).start()
 
     window.events.loaded += on_main_window_loaded
     window.events.closing += lambda: api.shutdown()

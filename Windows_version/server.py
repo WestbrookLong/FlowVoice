@@ -543,6 +543,7 @@ def create_app(
     text_agent: Any = None,
     typing_stats: Any = None,
     input_gate: Any = None,
+    voice_ask: Any = None,
     phone_control: PhoneControlHub | None = None,
     voice_hold_state_callback: Callable[[bool, str], None] | None = None,
     mobile_input_blocked_callback: Callable[[], bool] | None = None,
@@ -637,7 +638,19 @@ def create_app(
                         voice_hold_state_callback(active, reason)
                     await ws.send_json({"type": "ack", "seq": payload.get("seq")})
                     continue
-                if mobile_input_blocked_callback is not None and mobile_input_blocked_callback():
+                voice_ask_mobile_route = False
+                if message_type in {"sync_state", "rebase_settings"} and voice_ask is not None:
+                    text = payload.get("text")
+                    if not isinstance(text, str):
+                        raise ValueError(f"{message_type}.text must be a string")
+                    BridgeSettings.from_payload(payload.get("settings"))
+                    voice_ask.observe_source("mobile", text)
+                    voice_ask_mobile_route = voice_ask.should_capture("mobile")
+                if (
+                    not voice_ask_mobile_route
+                    and mobile_input_blocked_callback is not None
+                    and mobile_input_blocked_callback()
+                ):
                     if not input_gate_blocked:
                         if text_agent_route_active:
                             text_agent_route_active = False
@@ -646,7 +659,7 @@ def create_app(
                     paused_raw_text = payload.get("text") if isinstance(payload.get("text"), str) else paused_raw_text
                     await ws.send_json({"type": "ack", "seq": payload.get("seq")})
                     continue
-                if input_gate is not None and input_gate.is_paused():
+                if not voice_ask_mobile_route and input_gate is not None and input_gate.is_paused():
                     if not input_gate_blocked:
                         if text_agent_route_active:
                             text_agent_route_active = False
@@ -688,7 +701,11 @@ def create_app(
                         session.raw_text = trim_raw_text(text, session)
                         paused_raw_text = None
                         session.sync_state(text, settings)
-                    elif text_agent is not None and text_agent.should_capture_text():
+                    elif (
+                        not voice_ask_mobile_route
+                        and text_agent is not None
+                        and text_agent.should_capture_text()
+                    ):
                         text_agent_route_active = True
                         active_source_text = text_agent.capture_active_source(text)
                         text_agent.update_text(

@@ -41,6 +41,24 @@ const fallbackState = {
     error: null,
     label: "Alt+M",
   },
+  voiceAsk: {
+    enabled: true,
+    configured: false,
+    model: "qwen-plus",
+    status: "idle",
+    prompt: "",
+    error: null,
+    resultWindowReady: false,
+    resultWindowError: null,
+  },
+  voiceAskMode: "tap_voice",
+  voiceAskTapActive: false,
+  voiceAskAutoState: "ready",
+  voiceAskHotkey: {
+    registered: false,
+    error: null,
+    label: "Ctrl+Alt+A",
+  },
   typingStats: {
     allTime: { total: 0, mobile: 0, computer: 0 },
     today: { total: 0, mobile: 0, computer: 0 },
@@ -72,8 +90,9 @@ function FlowVoiceDesktopConsole() {
   const [state, setState] = React.useState(fallbackState);
   const [message, setMessage] = React.useState("");
   const [typingStatsOpen, setTypingStatsOpen] = React.useState(false);
-  const [capturingHotkey, setCapturingHotkey] = React.useState(false);
+  const [capturingHotkey, setCapturingHotkey] = React.useState(null);
   const [singleKeyCapture, setSingleKeyCapture] = React.useState({ key: "", progress: 0 });
+  const [voiceAskApiKey, setVoiceAskApiKey] = React.useState("");
   const refreshInFlight = React.useRef(false);
 
   const ip = state.ip;
@@ -90,6 +109,11 @@ function FlowVoiceDesktopConsole() {
   const typingStats = state.typingStats || fallbackState.typingStats;
   const publicConnection = state.publicConnection || fallbackState.publicConnection;
   const connectionMode = state.connectionMode || "local";
+  const voiceAsk = state.voiceAsk || fallbackState.voiceAsk;
+  const voiceAskMode = state.voiceAskMode || "tap_voice";
+  const voiceAskHotkey = state.voiceAskHotkey || fallbackState.voiceAskHotkey;
+  const voiceAskTapActive = Boolean(state.voiceAskTapActive);
+  const voiceAskAutoState = state.voiceAskAutoState || "ready";
 
   const refresh = React.useCallback(async () => {
     const api = desktopApi();
@@ -155,8 +179,9 @@ function FlowVoiceDesktopConsole() {
 
     const submitHotkey = async (event, singleKey = false) => {
       clearSingleKeyHold();
-      setCapturingHotkey(false);
-      await callApi("set_input_gate_hotkey", {
+      const action = capturingHotkey === "voice_ask" ? "set_voice_ask_hotkey" : "set_input_gate_hotkey";
+      setCapturingHotkey(null);
+      await callApi(action, {
         key: event.key,
         code: event.code,
         ctrlKey: event.ctrlKey,
@@ -172,7 +197,7 @@ function FlowVoiceDesktopConsole() {
       event.stopPropagation();
       if (event.key === "Escape") {
         clearSingleKeyHold();
-        setCapturingHotkey(false);
+        setCapturingHotkey(null);
         setMessage("Hotkey capture cancelled.");
         return;
       }
@@ -471,14 +496,14 @@ function FlowVoiceDesktopConsole() {
                     tabIndex={0}
                     onClick={(event) => {
                       event.stopPropagation();
-                      setCapturingHotkey(true);
+                      setCapturingHotkey("input_gate");
                       setMessage("Press the new hotkey. Press Esc to cancel.");
                     }}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
                         event.stopPropagation();
-                        setCapturingHotkey(true);
+                        setCapturingHotkey("input_gate");
                         setMessage("Press the new hotkey. Press Esc to cancel.");
                       }
                     }}
@@ -531,6 +556,93 @@ function FlowVoiceDesktopConsole() {
               </div>
             </div>
 
+            <div className="rounded-[26px] border border-[#27445A] bg-[#081019]/92 p-6 text-left shadow-[0_26px_80px_rgba(0,0,0,0.5)]">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="font-mono text-[11px] uppercase tracking-[0.28em] text-[#79CFFF]/75">Voice Ask</div>
+                  <h2 className="mt-2 text-2xl font-semibold text-[#F2FAFF]">
+                    {voiceAsk.status === "listening"
+                      ? "Listening"
+                      : voiceAsk.status === "thinking"
+                        ? "Thinking"
+                        : voiceAsk.status === "completed"
+                          ? "Answer Ready"
+                          : "Ask Ready"}
+                  </h2>
+                  <p className="mt-1 text-sm text-[#7FA3B8]">
+                    {voiceAskHotkey.label} · {voiceAsk.model} · {voiceAsk.configured ? "API ready" : "API key missing"} ·{" "}
+                    {voiceAsk.resultWindowReady ? "Window ready" : "Window unavailable"}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => callApi("set_voice_ask_enabled", !voiceAsk.enabled)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                      voiceAsk.enabled
+                        ? "border-[#3280A8] bg-[#12344A] text-[#BFEAFF]"
+                        : "border-[#31404A] bg-[#11181C] text-[#748894]"
+                    }`}
+                  >
+                    {voiceAsk.enabled ? "On" : "Off"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCapturingHotkey("voice_ask");
+                      setMessage("Press the new Voice Ask hotkey. Press Esc to cancel.");
+                    }}
+                    className="rounded-xl border border-[#3280A8] bg-[#102A3A] px-3 py-2 text-xs font-semibold text-[#BFEAFF] transition hover:bg-[#163A50]"
+                  >
+                    Change
+                  </button>
+                </div>
+              </div>
+              <div className="mt-5 grid grid-cols-4 rounded-xl border border-[#203D50] bg-[#050A0D] p-1">
+                {[
+                  ["pause", "Capture Only"],
+                  ["voice_hold", "Hold Voice"],
+                  ["tap_voice", "Tap Voice"],
+                  ["auto_voice", "Auto Voice"],
+                ].map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => callApi("set_voice_ask_mode", mode)}
+                    className={`rounded-lg px-2 py-2 text-xs font-semibold transition ${
+                      voiceAskMode === mode ? "bg-[#153A50] text-[#C5ECFF]" : "text-[#718D9D] hover:text-[#B8E5FA]"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-4 flex gap-2">
+                <input
+                  type="password"
+                  value={voiceAskApiKey}
+                  onChange={(event) => setVoiceAskApiKey(event.target.value)}
+                  placeholder={voiceAsk.configured ? "DashScope API key configured" : "DashScope API key"}
+                  className="min-w-0 flex-1 rounded-xl border border-[#203D50] bg-[#050A0D] px-3 py-2 text-xs text-[#DDF4FF] outline-none placeholder:text-[#587080] focus:border-[#3280A8]"
+                />
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await callApi("set_voice_ask_api_key", voiceAskApiKey);
+                    setVoiceAskApiKey("");
+                  }}
+                  className="rounded-xl border border-[#3280A8] bg-[#102A3A] px-4 py-2 text-xs font-semibold text-[#BFEAFF]"
+                >
+                  Save Key
+                </button>
+              </div>
+              {(voiceAsk.error || voiceAsk.resultWindowError || voiceAskHotkey.error) && (
+                <p className="mt-3 text-xs text-[#FFB0A9]">
+                  {voiceAsk.error || voiceAsk.resultWindowError || voiceAskHotkey.error}
+                </p>
+              )}
+            </div>
+
             <div className="mt-auto rounded-[26px] border border-[#2F2A17] bg-[#161308]/75 px-5 py-4 text-sm leading-6 text-[#D7C47A]">
               To control elevated windows, run the client with administrator privileges.
             </div>
@@ -545,8 +657,9 @@ function FlowVoiceDesktopConsole() {
       )}
       {capturingHotkey && (
         <HotkeyCaptureOverlay
+          title={capturingHotkey === "voice_ask" ? "Set Voice Ask Hotkey" : "Set Input Gate Hotkey"}
           singleKeyCapture={singleKeyCapture}
-          onCancel={() => setCapturingHotkey(false)}
+          onCancel={() => setCapturingHotkey(null)}
         />
       )}
       </div>
@@ -554,11 +667,11 @@ function FlowVoiceDesktopConsole() {
   );
 }
 
-function HotkeyCaptureOverlay({ onCancel, singleKeyCapture }) {
+function HotkeyCaptureOverlay({ onCancel, singleKeyCapture, title }) {
   return createPortal(
     <div className="fixed inset-0 z-[120] grid place-items-center bg-[#020503]/78 backdrop-blur-sm">
       <div className="w-[min(460px,calc(100vw-48px))] rounded-[26px] border border-[#2E7447] bg-[#08100D] p-7 text-center shadow-[0_30px_90px_rgba(0,0,0,0.62)]">
-        <div className="font-mono text-[11px] uppercase tracking-[0.3em] text-[#74E7A5]/70">Input Gate Hotkey</div>
+        <div className="font-mono text-[11px] uppercase tracking-[0.3em] text-[#74E7A5]/70">{title}</div>
         <h2 className="mt-3 text-2xl font-semibold text-[#F2FFF7]">请按下快捷键</h2>
         <p className="mt-3 text-sm leading-6 text-[#8EA99A]">
           组合键会立即保存；单个按键需要持续按住 3 秒。若快捷键已被系统占用，会自动保留原设置。
