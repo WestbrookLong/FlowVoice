@@ -66,6 +66,12 @@ const fallbackState = {
     month: { total: 0, mobile: 0, computer: 0 },
     history: [],
   },
+  fileTransfer: {
+    saveDirectory: "",
+    imageClipboardMode: "image",
+    maxUploadMb: 100,
+    lastUpload: null,
+  },
 };
 
 function desktopApi() {
@@ -90,6 +96,7 @@ function FlowVoiceDesktopConsole() {
   const [state, setState] = React.useState(fallbackState);
   const [message, setMessage] = React.useState("");
   const [typingStatsOpen, setTypingStatsOpen] = React.useState(false);
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [capturingHotkey, setCapturingHotkey] = React.useState(null);
   const [singleKeyCapture, setSingleKeyCapture] = React.useState({ key: "", progress: 0 });
   const [voiceAskApiKey, setVoiceAskApiKey] = React.useState("");
@@ -107,6 +114,7 @@ function FlowVoiceDesktopConsole() {
   const autoVoiceActive = inputGateMode === "auto_voice" && autoVoiceState !== "ready";
   const desktopOnnxVoice = state.desktopOnnxVoice || fallbackState.desktopOnnxVoice;
   const typingStats = state.typingStats || fallbackState.typingStats;
+  const fileTransfer = state.fileTransfer || fallbackState.fileTransfer;
   const publicConnection = state.publicConnection || fallbackState.publicConnection;
   const connectionMode = state.connectionMode || "local";
   const voiceAsk = state.voiceAsk || fallbackState.voiceAsk;
@@ -297,6 +305,15 @@ function FlowVoiceDesktopConsole() {
             <span className="font-mono text-xs text-[#5B7062]">{ip}:{port}</span>
             <InputGateBadge paused={inputGate.paused} label={inputGateHotkey.label || inputGate.label} />
             <ServiceBadge running={state.running} />
+            <button
+              type="button"
+              title="File transfer settings"
+              aria-label="File transfer settings"
+              onClick={() => setSettingsOpen(true)}
+              className="grid h-10 w-10 place-items-center rounded-xl border border-[#285C3B] bg-[#0C1E14] text-xl text-[#B9FFD4] transition hover:bg-[#163A26]"
+            >
+              &#9881;
+            </button>
           </div>
         </header>
 
@@ -655,6 +672,15 @@ function FlowVoiceDesktopConsole() {
           onClose={() => setTypingStatsOpen(false)}
         />
       )}
+      {settingsOpen && (
+        <FileTransferSettings
+          settings={fileTransfer}
+          onClose={() => setSettingsOpen(false)}
+          onChoose={() => callApi("choose_upload_directory")}
+          onOpenFolder={() => callApi("open_upload_directory")}
+          onSave={(value) => callApi("set_file_transfer_settings", value)}
+        />
+      )}
       {capturingHotkey && (
         <HotkeyCaptureOverlay
           title={capturingHotkey === "voice_ask" ? "Set Voice Ask Hotkey" : "Set Input Gate Hotkey"}
@@ -664,6 +690,92 @@ function FlowVoiceDesktopConsole() {
       )}
       </div>
     </div>
+  );
+}
+
+function FileTransferSettings({ settings, onChoose, onClose, onOpenFolder, onSave }) {
+  const [mode, setMode] = React.useState(settings.imageClipboardMode || "image");
+
+  React.useEffect(() => {
+    setMode(settings.imageClipboardMode || "image");
+  }, [settings.imageClipboardMode]);
+
+  return createPortal(
+    <div className="fixed inset-0 z-[110] grid place-items-center bg-[#020503]/78 px-6 backdrop-blur-sm">
+      <div className="w-full max-w-xl rounded-[26px] border border-[#2E7447] bg-[#08100D] p-7 shadow-[0_30px_90px_rgba(0,0,0,0.62)]">
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="font-mono text-[11px] uppercase tracking-[0.3em] text-[#74E7A5]/70">File Transfer</div>
+            <h2 className="mt-2 text-2xl font-semibold text-[#F2FFF7]">Upload Settings</h2>
+          </div>
+          <button
+            type="button"
+            aria-label="Close settings"
+            onClick={onClose}
+            className="grid h-10 w-10 place-items-center rounded-xl border border-[#285C3B] bg-[#0C1E14] text-lg text-[#B9FFD4]"
+          >
+            &#215;
+          </button>
+        </div>
+
+        <div className="mt-7">
+          <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-[#6F8D79]">Save Folder</div>
+          <div className="mt-2 break-all rounded-xl border border-[#193324] bg-[#050C08] px-4 py-3 font-mono text-xs leading-5 text-[#B9FFD4]">
+            {settings.saveDirectory || "Not configured"}
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <button type="button" onClick={onChoose} className="rounded-xl border border-[#2E7447] bg-[#10291B] py-3 text-sm font-semibold text-[#B9FFD4]">
+              Browse
+            </button>
+            <button type="button" onClick={onOpenFolder} className="rounded-xl border border-[#285C3B] bg-[#0C1E14] py-3 text-sm font-semibold text-[#A8F7C4]">
+              Open Folder
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-7">
+          <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-[#6F8D79]">Image Clipboard</div>
+          <div className="mt-3 grid grid-cols-2 rounded-xl border border-[#234531] bg-[#050A07] p-1">
+            <button
+              type="button"
+              onClick={() => setMode("image")}
+              className={`rounded-lg px-3 py-3 text-sm font-semibold transition ${mode === "image" ? "bg-[#163A26] text-[#B9FFD4]" : "text-[#6F8D79]"}`}
+            >
+              Copy Image
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("path")}
+              className={`rounded-lg px-3 py-3 text-sm font-semibold transition ${mode === "path" ? "bg-[#163A26] text-[#B9FFD4]" : "text-[#6F8D79]"}`}
+            >
+              Copy Saved Path
+            </button>
+          </div>
+          <p className="mt-3 text-xs leading-5 text-[#7FA98E]">
+            Non-image files always copy their saved computer path. Multiple files copy one absolute path per line.
+          </p>
+        </div>
+
+        {settings.lastUpload?.files?.length > 0 && (
+          <div className="mt-6 rounded-xl border border-[#193324] bg-[#050C08]/80 px-4 py-3">
+            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-[#5B7062]">Last Upload</div>
+            <div className="mt-1 truncate text-sm text-[#A8F7C4]">{settings.lastUpload.files[0].name}</div>
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={async () => {
+            await onSave({ imageClipboardMode: mode });
+            onClose();
+          }}
+          className="mt-7 w-full rounded-xl bg-[#28F58D] py-3 text-sm font-bold text-[#041008] transition hover:bg-[#67FFAD]"
+        >
+          Save Settings
+        </button>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

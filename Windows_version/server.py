@@ -547,8 +547,9 @@ def create_app(
     phone_control: PhoneControlHub | None = None,
     voice_hold_state_callback: Callable[[bool, str], None] | None = None,
     mobile_input_blocked_callback: Callable[[], bool] | None = None,
+    file_transfer: Any = None,
 ) -> web.Application:
-    app = web.Application()
+    app = web.Application(client_max_size=101 * 1024 * 1024)
     session = FlowInputSession(
         (lambda text: typing_stats.record(text, "mobile")) if typing_stats is not None else None
     )
@@ -556,8 +557,10 @@ def create_app(
 
     def require_token(request: web.Request, payload: dict[str, Any] | None = None) -> None:
         request_token = request.query.get("token")
+        authorization = request.headers.get("Authorization", "")
+        bearer_token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else None
         payload_token = payload.get("token") if isinstance(payload, dict) else None
-        if request_token != token and payload_token != token:
+        if request_token != token and payload_token != token and bearer_token != token:
             raise web.HTTPUnauthorized(text="invalid token")
 
     def html_response(path: Path) -> web.FileResponse:
@@ -591,6 +594,13 @@ def create_app(
             raise web.HTTPBadRequest(text="payload must be an object")
         text_agent.set_mode(bool(payload.get("enabled", False)))
         return web.json_response(text_agent.get_state())
+
+    async def file_upload(request: web.Request) -> web.Response:
+        log(f"[file-upload] request method={request.method} peer={request.remote or 'unknown'}")
+        require_token(request)
+        if file_transfer is None:
+            raise web.HTTPServiceUnavailable(text="file transfer is not configured")
+        return await file_transfer.handle_upload(request)
 
     async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         nonlocal text_agent_route_active
@@ -779,9 +789,12 @@ def create_app(
         return ws
 
     app.router.add_get("/", index)
+    app.router.add_post("/", file_upload)
     app.router.add_get("/health", health)
     app.router.add_get("/api/text-agent/state", text_agent_state)
     app.router.add_post("/api/text-agent/mode", text_agent_mode)
+    app.router.add_post("/api/files/upload", file_upload)
+    app.router.add_post("/api/files/upload/", file_upload)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_static("/static", STATIC_DIR)
     return app

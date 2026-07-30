@@ -30,6 +30,7 @@ from asr.sherpa_onnx_engine import MODEL_NAME as SHERPA_ONNX_MODEL_NAME
 from asr.sherpa_onnx_engine import SherpaOnnxStreamingEngine
 from asr.vosk_engine import VoskEngine
 from input_gate import InputGate
+from file_transfer import FileTransferManager
 from server import BridgeSettings, FlowInputSession, PhoneControlHub, create_app, get_lan_ip, log, render_text, send_backspace_chunks, type_text
 from text_agent import TextAgentManager
 from typing_stats import TypingStats
@@ -482,6 +483,7 @@ class BridgeServerThread(threading.Thread):
         voice_ask: VoiceAskManager | None = None,
         voice_hold_state_callback=None,
         mobile_input_blocked_callback=None,
+        file_transfer: FileTransferManager | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.host = host
@@ -493,6 +495,7 @@ class BridgeServerThread(threading.Thread):
         self.voice_ask = voice_ask
         self.voice_hold_state_callback = voice_hold_state_callback
         self.mobile_input_blocked_callback = mobile_input_blocked_callback
+        self.file_transfer = file_transfer
         self.loop: asyncio.AbstractEventLoop | None = None
         self.runner: web.AppRunner | None = None
         self.ready = threading.Event()
@@ -523,6 +526,7 @@ class BridgeServerThread(threading.Thread):
             phone_control=self.phone_control,
             voice_hold_state_callback=self.voice_hold_state_callback,
             mobile_input_blocked_callback=self.mobile_input_blocked_callback,
+            file_transfer=self.file_transfer,
         )
         self.runner = web.AppRunner(app, access_log=None)
         await self.runner.setup()
@@ -1429,6 +1433,7 @@ class DesktopApi:
         self.input_gate = InputGate()
         self.cloudflare_tunnel = CloudflareTunnel()
         self.connection_mode = "local"
+        self.file_transfer = FileTransferManager(copy_text=copy_text_to_clipboard, log=log)
         self.typing_stats = TypingStats(
             Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "typing_stats.json"
         )
@@ -1609,6 +1614,7 @@ class DesktopApi:
                     "label": self.voice_ask_hotkey_config["label"],
                 },
                 "typingStats": self.typing_stats.snapshot(),
+                "fileTransfer": self.file_transfer.snapshot(),
             }
 
     def set_port(self, value: str) -> dict:
@@ -1653,6 +1659,7 @@ class DesktopApi:
             self.voice_ask,
             self._handle_phone_voice_hold_state,
             self._mobile_input_blocked,
+            self.file_transfer,
         )
         self.server_thread = thread
         thread.start()
@@ -1769,6 +1776,39 @@ class DesktopApi:
     def open_url(self) -> dict:
         webbrowser.open(self.get_state()["url"])
         return self._result("Opened the voice input page.")
+
+    def choose_upload_directory(self) -> dict:
+        window = self.window
+        if window is None:
+            return self._result("Desktop window is not ready.")
+        try:
+            selected = window.create_file_dialog(
+                webview.FileDialog.FOLDER,
+                directory=self.file_transfer.snapshot()["saveDirectory"],
+            )
+            if selected:
+                path = selected[0] if isinstance(selected, (list, tuple)) else selected
+                self.file_transfer.update_settings({"saveDirectory": str(path)})
+                return self._result("Upload folder updated.")
+            return self._result()
+        except Exception as exc:
+            return self._result(f"Folder selection failed: {exc}")
+
+    def set_file_transfer_settings(self, value: dict) -> dict:
+        try:
+            self.file_transfer.update_settings(value if isinstance(value, dict) else {})
+            return self._result("File transfer settings saved.")
+        except Exception as exc:
+            return self._result(f"File transfer settings failed: {exc}")
+
+    def open_upload_directory(self) -> dict:
+        try:
+            directory = Path(self.file_transfer.snapshot()["saveDirectory"])
+            directory.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(directory))
+            return self._result()
+        except Exception as exc:
+            return self._result(f"Unable to open upload folder: {exc}")
 
     def set_text_agent_mode(self, value: dict | bool) -> dict:
         enabled = bool(value.get("enabled")) if isinstance(value, dict) else bool(value)
