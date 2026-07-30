@@ -129,6 +129,8 @@ class FileTransferManager:
         self.save_directory = Path(saved.get("saveDirectory") or DEFAULT_UPLOAD_DIR).expanduser()
         mode = str(saved.get("imageClipboardMode") or "image")
         self.image_clipboard_mode = mode if mode in VALID_IMAGE_CLIPBOARD_MODES else "image"
+        self.auto_screenshot_upload = bool(saved.get("autoScreenshotUpload", False))
+        self.mobile_monitor_status = "disconnected"
         self.last_upload: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
@@ -136,9 +138,23 @@ class FileTransferManager:
             return {
                 "saveDirectory": str(self.save_directory),
                 "imageClipboardMode": self.image_clipboard_mode,
+                "autoScreenshotUpload": self.auto_screenshot_upload,
+                "mobileMonitorStatus": self.mobile_monitor_status,
                 "maxUploadMb": MAX_UPLOAD_BYTES // (1024 * 1024),
                 "lastUpload": dict(self.last_upload) if self.last_upload else None,
             }
+
+    def mobile_config(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "type": "file_upload_config",
+                "autoScreenshotUpload": self.auto_screenshot_upload,
+            }
+
+    def update_mobile_status(self, status: str) -> None:
+        allowed = {"disabled", "listening", "permission_required", "error", "disconnected"}
+        with self.lock:
+            self.mobile_monitor_status = status if status in allowed else "error"
 
     def update_settings(self, payload: dict[str, Any]) -> None:
         with self.lock:
@@ -155,11 +171,15 @@ class FileTransferManager:
                 if mode not in VALID_IMAGE_CLIPBOARD_MODES:
                     raise ValueError("Invalid image clipboard mode.")
                 self.image_clipboard_mode = mode
+            auto_upload = payload.get("autoScreenshotUpload")
+            if auto_upload is not None:
+                self.auto_screenshot_upload = bool(auto_upload)
             _atomic_write_json(
                 self.settings_path,
                 {
                     "saveDirectory": str(self.save_directory),
                     "imageClipboardMode": self.image_clipboard_mode,
+                    "autoScreenshotUpload": self.auto_screenshot_upload,
                 },
             )
 

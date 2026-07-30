@@ -614,6 +614,8 @@ def create_app(
         if phone_control is not None:
             phone_control.attach(ws)
         await ws.send_json({"type": "ready"})
+        if file_transfer is not None:
+            await ws.send_json(file_transfer.mobile_config())
         input_gate_blocked = False
         paused_raw_text: str | None = None
 
@@ -629,6 +631,14 @@ def create_app(
                     continue
 
                 message_type = payload.get("type")
+                if message_type == "screenshot_upload_state":
+                    status = payload.get("status")
+                    if not isinstance(status, str):
+                        raise ValueError("screenshot_upload_state.status must be a string")
+                    if file_transfer is not None:
+                        file_transfer.update_mobile_status(status)
+                    await ws.send_json({"type": "ack", "seq": payload.get("seq")})
+                    continue
                 if message_type == "voice_hold_state":
                     active = payload.get("active")
                     reason = payload.get("reason", "released")
@@ -785,6 +795,8 @@ def create_app(
             phone_control.detach(ws)
             if not phone_control.has_connections() and voice_hold_state_callback is not None:
                 voice_hold_state_callback(False, "service_stopped")
+            if not phone_control.has_connections() and file_transfer is not None:
+                file_transfer.update_mobile_status("disconnected")
         log(f"[ws] disconnected: {peer}")
         return ws
 

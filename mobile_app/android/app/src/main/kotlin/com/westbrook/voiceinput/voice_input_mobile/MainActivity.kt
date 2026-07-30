@@ -1,9 +1,12 @@
 package com.westbrook.voiceinput.voice_input_mobile
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -12,6 +15,13 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         stopFloatingOverlay()
+        if (
+            ScreenshotMonitorService.isEnabled(this) &&
+            ScreenshotMonitorService.hasImagePermission(this)
+        ) {
+            startScreenshotMonitor()
+            sendScreenshotUploadState("listening")
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -106,8 +116,32 @@ class MainActivity : FlutterActivity() {
                         result.success(saved)
                     }
                 }
+                "setAutoScreenshotUpload" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    result.success(applyScreenshotUploadConfig(enabled))
+                }
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != SCREENSHOT_PERMISSION_REQUEST) {
+            return
+        }
+        if (
+            grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        ) {
+            startScreenshotMonitor()
+            sendScreenshotUploadState("listening")
+        } else {
+            sendScreenshotUploadState("permission_required")
         }
     }
 
@@ -139,6 +173,41 @@ class MainActivity : FlutterActivity() {
         startActivity(intent)
     }
 
+    private fun applyScreenshotUploadConfig(enabled: Boolean): String {
+        ScreenshotMonitorService.setEnabled(this, enabled)
+        if (!enabled) {
+            stopScreenshotMonitor()
+            return "disabled"
+        }
+        if (!ScreenshotMonitorService.hasImagePermission(this)) {
+            requestScreenshotPermission()
+            return "permission_required"
+        }
+        startScreenshotMonitor()
+        return "listening"
+    }
+
+    private fun requestScreenshotPermission() {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        requestPermissions(arrayOf(permission), SCREENSHOT_PERMISSION_REQUEST)
+    }
+
+    private fun startScreenshotMonitor() {
+        val intent = Intent(this, ScreenshotMonitorService::class.java)
+            .setAction(ScreenshotMonitorService.ACTION_START)
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    private fun stopScreenshotMonitor() {
+        val intent = Intent(this, ScreenshotMonitorService::class.java)
+            .setAction(ScreenshotMonitorService.ACTION_STOP)
+        startService(intent)
+    }
+
     private fun stopFloatingOverlay() {
         val intent = Intent(this, FloatingInputService::class.java)
             .setAction(FloatingInputService.ACTION_STOP)
@@ -147,6 +216,7 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val OVERLAY_CHANNEL = "flowvoice/overlay"
+        private const val SCREENSHOT_PERMISSION_REQUEST = 2402
         private var overlayChannel: MethodChannel? = null
 
         fun sendOverlayText(text: String) {
@@ -162,6 +232,10 @@ class MainActivity : FlutterActivity() {
                 "voiceHoldState",
                 mapOf("active" to active, "reason" to reason),
             )
+        }
+
+        fun sendScreenshotUploadState(status: String) {
+            overlayChannel?.invokeMethod("screenshotUploadState", status)
         }
     }
 }

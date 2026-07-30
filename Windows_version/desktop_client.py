@@ -542,10 +542,13 @@ class BridgeServerThread(threading.Thread):
             self.loop.call_soon_threadsafe(self.loop.stop)
 
     def send_phone_control(self, message_type: str) -> bool:
+        return self.send_phone_payload({"type": message_type})
+
+    def send_phone_payload(self, payload: dict) -> bool:
         if self.loop is None or not self.loop.is_running():
             return False
         future = asyncio.run_coroutine_threadsafe(
-            self.phone_control.broadcast({"type": message_type}),
+            self.phone_control.broadcast(payload),
             self.loop,
         )
         try:
@@ -1797,6 +1800,9 @@ class DesktopApi:
     def set_file_transfer_settings(self, value: dict) -> dict:
         try:
             self.file_transfer.update_settings(value if isinstance(value, dict) else {})
+            thread = self.server_thread
+            if thread is not None:
+                thread.send_phone_payload(self.file_transfer.mobile_config())
             return self._result("File transfer settings saved.")
         except Exception as exc:
             return self._result(f"File transfer settings failed: {exc}")

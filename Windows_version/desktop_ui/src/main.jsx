@@ -69,6 +69,8 @@ const fallbackState = {
   fileTransfer: {
     saveDirectory: "",
     imageClipboardMode: "image",
+    autoScreenshotUpload: false,
+    mobileMonitorStatus: "disconnected",
     maxUploadMb: 100,
     lastUpload: null,
   },
@@ -695,10 +697,20 @@ function FlowVoiceDesktopConsole() {
 
 function FileTransferSettings({ settings, onChoose, onClose, onOpenFolder, onSave }) {
   const [mode, setMode] = React.useState(settings.imageClipboardMode || "image");
+  const [autoScreenshotUpload, setAutoScreenshotUpload] = React.useState(Boolean(settings.autoScreenshotUpload));
 
   React.useEffect(() => {
     setMode(settings.imageClipboardMode || "image");
-  }, [settings.imageClipboardMode]);
+    setAutoScreenshotUpload(Boolean(settings.autoScreenshotUpload));
+  }, [settings.imageClipboardMode, settings.autoScreenshotUpload]);
+
+  const monitorLabel = {
+    listening: "Phone is monitoring screenshots",
+    permission_required: "Open Flow Voice on the phone and allow photo access",
+    error: "Screenshot monitor error",
+    disabled: "Automatic upload is disabled",
+    disconnected: "Phone is not connected",
+  }[settings.mobileMonitorStatus] || "Waiting for phone status";
 
   return createPortal(
     <div className="fixed inset-0 z-[110] grid place-items-center bg-[#020503]/78 px-6 backdrop-blur-sm">
@@ -731,6 +743,26 @@ function FileTransferSettings({ settings, onChoose, onClose, onOpenFolder, onSav
               Open Folder
             </button>
           </div>
+        </div>
+
+        <div className="mt-7 flex items-center justify-between gap-5 rounded-xl border border-[#234531] bg-[#050A07] px-4 py-4">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-[#DDF7E7]">Auto-upload screenshots</div>
+            <p className="mt-1 text-xs leading-5 text-[#7FA98E]">{monitorLabel}</p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoScreenshotUpload}
+            onClick={() => setAutoScreenshotUpload((value) => !value)}
+            className={`relative h-7 w-12 shrink-0 rounded-full border transition ${
+              autoScreenshotUpload ? "border-[#28F58D] bg-[#163A26]" : "border-[#355443] bg-[#0B1510]"
+            }`}
+          >
+            <span className={`absolute top-1 h-[18px] w-[18px] rounded-full bg-[#DDF7E7] transition-all ${
+              autoScreenshotUpload ? "left-[25px]" : "left-1"
+            }`} />
+          </button>
         </div>
 
         <div className="mt-7">
@@ -766,7 +798,10 @@ function FileTransferSettings({ settings, onChoose, onClose, onOpenFolder, onSav
         <button
           type="button"
           onClick={async () => {
-            await onSave({ imageClipboardMode: mode });
+            await onSave({
+              imageClipboardMode: mode,
+              autoScreenshotUpload,
+            });
             onClose();
           }}
           className="mt-7 w-full rounded-xl bg-[#28F58D] py-3 text-sm font-bold text-[#041008] transition hover:bg-[#67FFAD]"

@@ -260,6 +260,11 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   }
 
   Future<dynamic> _handleOverlayCall(MethodCall call) async {
+    if (call.method == 'screenshotUploadState') {
+      final status = call.arguments is String ? call.arguments as String : 'error';
+      _sendScreenshotUploadState(status);
+      return null;
+    }
     if (call.method == 'overlayDiagnostic') {
       final message = call.arguments is String ? call.arguments as String : '';
       if (message.isNotEmpty) {
@@ -675,6 +680,9 @@ class _FlowVoicePageState extends State<FlowVoicePage>
         final type = message['type'];
         if (type == 'ready') {
           unawaited(_persistShareConnection());
+        } else if (type == 'file_upload_config') {
+          final enabled = message['autoScreenshotUpload'] == true;
+          unawaited(_applyScreenshotUploadConfig(enabled));
         } else if (type == 'error') {
           _setStatus(BridgeStatus.error, '电脑错误');
         } else if (type == 'voice_hold_start') {
@@ -710,6 +718,31 @@ class _FlowVoicePageState extends State<FlowVoicePage>
     try {
       await _overlayChannel.invokeMethod<void>('stopVoiceHold');
     } catch (_) {}
+  }
+
+  Future<void> _applyScreenshotUploadConfig(bool enabled) async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      final status = await _overlayChannel.invokeMethod<String>(
+            'setAutoScreenshotUpload',
+            <String, Object?>{'enabled': enabled},
+          ) ??
+          'error';
+      _sendScreenshotUploadState(status);
+    } catch (_) {
+      _sendScreenshotUploadState('error');
+    }
+  }
+
+  void _sendScreenshotUploadState(String status) {
+    _send(<String, Object?>{
+      'type': 'screenshot_upload_state',
+      'token': _tokenController.text.trim(),
+      'seq': ++_seq,
+      'status': status,
+    });
   }
 
   void _handleSocketClosed(WebSocket socket, {required bool retry}) {
