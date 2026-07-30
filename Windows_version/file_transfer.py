@@ -119,10 +119,12 @@ class FileTransferManager:
         *,
         copy_text: Callable[[str], None],
         log: Callable[[str], None],
+        on_saved: Callable[[], None] | None = None,
         settings_path: Path = SETTINGS_PATH,
     ) -> None:
         self.copy_text = copy_text
         self.log = log
+        self.on_saved = on_saved
         self.settings_path = settings_path
         self.lock = threading.RLock()
         saved = _load_json(settings_path)
@@ -280,6 +282,11 @@ class FileTransferManager:
         self.log(
             f"[file-upload] saved {len(saved)} file(s), {total_bytes} bytes; clipboard={clipboard_mode}"
         )
+        if self.on_saved is not None:
+            try:
+                self.on_saved()
+            except Exception as exc:
+                self.log(f"[file-upload] saved notification failed: {exc}")
         return web.json_response(
             {
                 "ok": True,

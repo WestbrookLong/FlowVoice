@@ -1436,7 +1436,13 @@ class DesktopApi:
         self.input_gate = InputGate()
         self.cloudflare_tunnel = CloudflareTunnel()
         self.connection_mode = "local"
-        self.file_transfer = FileTransferManager(copy_text=copy_text_to_clipboard, log=log)
+        self.file_saved_toast_window = None
+        self._file_saved_toast_show = None
+        self.file_transfer = FileTransferManager(
+            copy_text=copy_text_to_clipboard,
+            log=log,
+            on_saved=self.show_file_saved_toast,
+        )
         self.typing_stats = TypingStats(
             Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "typing_stats.json"
         )
@@ -2340,6 +2346,22 @@ class DesktopApi:
         except Exception as exc:
             log(f"[desktop] input toast failed: {exc}")
 
+    def show_file_saved_toast(self) -> None:
+        toast_window = self.file_saved_toast_window
+        toast_show = self._file_saved_toast_show
+        if toast_window is None or toast_show is None:
+            log("[desktop] file saved toast is not ready")
+            return
+        try:
+            from System import Action
+
+            if getattr(toast_window, "InvokeRequired", False):
+                toast_window.BeginInvoke(Action(toast_show))
+            else:
+                toast_show()
+        except Exception as exc:
+            log(f"[desktop] file saved toast failed: {exc}")
+
     def show_agent_float(self) -> None:
         agent_window = self.agent_window
         if agent_window is None:
@@ -2581,7 +2603,11 @@ class DesktopApi:
             except Exception:
                 pass
             self.input_toast_window = None
-        for attribute in ("voice_ask_strip_window", "voice_ask_result_window"):
+        for attribute in (
+            "file_saved_toast_window",
+            "voice_ask_strip_window",
+            "voice_ask_result_window",
+        ):
             native_window = getattr(self, attribute, None)
             if native_window is None:
                 continue
@@ -3130,6 +3156,112 @@ def create_native_input_gate_toast(api: DesktopApi) -> object:
     return form
 
 
+def create_native_file_saved_toast(api: DesktopApi) -> object:
+    import clr
+
+    clr.AddReference("System.Drawing")
+    clr.AddReference("System.Windows.Forms")
+    from System.Drawing import Color, ContentAlignment, Font, FontStyle, Point, Region, Size
+    from System.Drawing.Drawing2D import GraphicsPath
+    from System.Windows.Forms import Form, FormBorderStyle, FormStartPosition, Label, Screen, Timer
+
+    form = Form()
+    form.Text = "FlowVoice Saved"
+    form.ClientSize = Size(138, 44)
+    form.FormBorderStyle = getattr(FormBorderStyle, "None")
+    form.TopMost = True
+    form.ShowInTaskbar = False
+    form.StartPosition = FormStartPosition.Manual
+    form.BackColor = Color.FromArgb(8, 8, 8)
+    form.Opacity = 0.96
+
+    path = GraphicsPath()
+    radius = 14
+    diameter = radius * 2
+    path.AddArc(0, 0, diameter, diameter, 180, 90)
+    path.AddArc(138 - diameter, 0, diameter, diameter, 270, 90)
+    path.AddArc(138 - diameter, 44 - diameter, diameter, diameter, 0, 90)
+    path.AddArc(0, 44 - diameter, diameter, diameter, 90, 90)
+    path.CloseFigure()
+    form.Region = Region(path)
+    path.Dispose()
+
+    label = Label()
+    label.AutoSize = False
+    label.Location = Point(0, 8)
+    label.Size = Size(138, 28)
+    label.Font = Font("Microsoft YaHei UI", 10, FontStyle.Bold)
+    label.ForeColor = Color.FromArgb(244, 248, 246)
+    label.BackColor = Color.Transparent
+    label.TextAlign = ContentAlignment.MiddleCenter
+    label.Text = "已保存"
+    form.Controls.Add(label)
+
+    hold_timer = Timer()
+    hold_timer.Interval = 950
+    fade_timer = Timer()
+    fade_timer.Interval = 35
+
+    def hide() -> None:
+        hold_timer.Stop()
+        fade_timer.Stop()
+        form.Hide()
+        form.Opacity = 0.96
+
+    def begin_fade(_sender=None, _event=None) -> None:
+        hold_timer.Stop()
+        fade_timer.Start()
+
+    def fade(_sender=None, _event=None) -> None:
+        next_opacity = form.Opacity - 0.11
+        if next_opacity <= 0.08:
+            hide()
+        else:
+            form.Opacity = next_opacity
+
+    hold_timer.Tick += begin_fade
+    fade_timer.Tick += fade
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetWindowLongPtrW.restype = ctypes.c_void_p
+    user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+    user32.GetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    SW_SHOWNOACTIVATE = 4
+    WS_EX_NOACTIVATE = 0x08000000
+    WS_EX_TOOLWINDOW = 0x00000080
+
+    def show_toast() -> None:
+        hold_timer.Stop()
+        fade_timer.Stop()
+        form.Opacity = 0.96
+        area = Screen.PrimaryScreen.WorkingArea
+        form.Left = int(area.Left + (area.Width - form.Width) / 2)
+        form.Top = int(area.Bottom - form.Height - 76)
+        if form.Visible:
+            form.Hide()
+        form.Show()
+        user32.ShowWindow(ctypes.c_void_p(form.Handle.ToInt64()), SW_SHOWNOACTIVATE)
+        hold_timer.Start()
+
+    def on_closed(_sender=None, _event=None) -> None:
+        hold_timer.Stop()
+        fade_timer.Stop()
+
+    form.FormClosed += on_closed
+    form.Show()
+    hwnd = ctypes.c_void_p(form.Handle.ToInt64())
+    ex_style = int(user32.GetWindowLongPtrW(hwnd, -20) or 0)
+    user32.SetWindowLongPtrW(
+        hwnd,
+        -20,
+        ctypes.c_void_p(ex_style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW),
+    )
+    form.Hide()
+    api._file_saved_toast_show = show_toast
+    return form
+
+
 def create_native_voice_ask_strip(api: DesktopApi) -> object:
     import clr
 
@@ -3485,6 +3617,27 @@ def main() -> None:
         except Exception as exc:
             log(f"[desktop] input toast window creation failed: {exc}")
 
+    def create_file_saved_toast_window() -> None:
+        if api.file_saved_toast_window is not None:
+            return
+        try:
+            log("[desktop] creating file saved toast window")
+            from System import Action
+
+            def create_on_ui_thread() -> None:
+                try:
+                    api.file_saved_toast_window = create_native_file_saved_toast(api)
+                    log("[desktop] file saved toast window ready")
+                except Exception as exc:
+                    log(f"[desktop] file saved toast window failed: {exc}\n{traceback.format_exc()}")
+
+            if window.native.InvokeRequired:
+                window.native.BeginInvoke(Action(create_on_ui_thread))
+            else:
+                create_on_ui_thread()
+        except Exception as exc:
+            log(f"[desktop] file saved toast window creation failed: {exc}")
+
     def create_voice_ask_windows() -> None:
         if api.voice_ask_strip_window is not None and api.voice_ask_result_window is not None:
             return
@@ -3518,6 +3671,7 @@ def main() -> None:
         log("[desktop] main window loaded")
         apply_window_chrome(window)
         threading.Timer(0.2, create_input_toast_window).start()
+        threading.Timer(0.28, create_file_saved_toast_window).start()
         threading.Timer(0.35, create_voice_ask_windows).start()
 
     window.events.loaded += on_main_window_loaded
