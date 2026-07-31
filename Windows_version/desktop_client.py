@@ -1441,7 +1441,8 @@ class DesktopApi:
         self.file_transfer = FileTransferManager(
             copy_text=copy_text_to_clipboard,
             log=log,
-            on_saved=self.show_file_saved_toast,
+            on_saved=lambda: self.show_file_saved_toast("已保存"),
+            on_clipboard_copied=lambda: self.show_file_saved_toast("已复制"),
         )
         self.typing_stats = TypingStats(
             Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "typing_stats.json"
@@ -2346,7 +2347,7 @@ class DesktopApi:
         except Exception as exc:
             log(f"[desktop] input toast failed: {exc}")
 
-    def show_file_saved_toast(self) -> None:
+    def show_file_saved_toast(self, message: str = "已保存") -> None:
         toast_window = self.file_saved_toast_window
         toast_show = self._file_saved_toast_show
         if toast_window is None or toast_show is None:
@@ -2356,9 +2357,9 @@ class DesktopApi:
             from System import Action
 
             if getattr(toast_window, "InvokeRequired", False):
-                toast_window.BeginInvoke(Action(toast_show))
+                toast_window.BeginInvoke(Action(lambda: toast_show(message)))
             else:
-                toast_show()
+                toast_show(message)
         except Exception as exc:
             log(f"[desktop] file saved toast failed: {exc}")
 
@@ -3231,10 +3232,11 @@ def create_native_file_saved_toast(api: DesktopApi) -> object:
     WS_EX_NOACTIVATE = 0x08000000
     WS_EX_TOOLWINDOW = 0x00000080
 
-    def show_toast() -> None:
+    def show_toast(message: str = "已保存") -> None:
         hold_timer.Stop()
         fade_timer.Stop()
         form.Opacity = 0.96
+        label.Text = str(message or "已保存")[:12]
         area = Screen.PrimaryScreen.WorkingArea
         form.Left = int(area.Left + (area.Width - form.Width) / 2)
         form.Top = int(area.Bottom - form.Height - 76)

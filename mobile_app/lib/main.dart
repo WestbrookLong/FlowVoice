@@ -265,6 +265,11 @@ class _FlowVoicePageState extends State<FlowVoicePage>
       _sendScreenshotUploadState(status);
       return null;
     }
+    if (call.method == 'clipboardSyncState') {
+      final status = call.arguments is String ? call.arguments as String : 'error';
+      _sendClipboardSyncState(status);
+      return null;
+    }
     if (call.method == 'overlayDiagnostic') {
       final message = call.arguments is String ? call.arguments as String : '';
       if (message.isNotEmpty) {
@@ -681,8 +686,10 @@ class _FlowVoicePageState extends State<FlowVoicePage>
         if (type == 'ready') {
           unawaited(_persistShareConnection());
         } else if (type == 'file_upload_config') {
-          final enabled = message['autoScreenshotUpload'] == true;
-          unawaited(_applyScreenshotUploadConfig(enabled));
+          final screenshotEnabled = message['autoScreenshotUpload'] == true;
+          final clipboardEnabled = message['autoClipboardSync'] == true;
+          unawaited(_applyScreenshotUploadConfig(screenshotEnabled));
+          unawaited(_applyClipboardSyncConfig(clipboardEnabled));
         } else if (type == 'error') {
           _setStatus(BridgeStatus.error, '电脑错误');
         } else if (type == 'voice_hold_start') {
@@ -739,6 +746,31 @@ class _FlowVoicePageState extends State<FlowVoicePage>
   void _sendScreenshotUploadState(String status) {
     _send(<String, Object?>{
       'type': 'screenshot_upload_state',
+      'token': _tokenController.text.trim(),
+      'seq': ++_seq,
+      'status': status,
+    });
+  }
+
+  Future<void> _applyClipboardSyncConfig(bool enabled) async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+    try {
+      final status = await _overlayChannel.invokeMethod<String>(
+            'setAutoClipboardSync',
+            <String, Object?>{'enabled': enabled},
+          ) ??
+          'error';
+      _sendClipboardSyncState(status);
+    } catch (_) {
+      _sendClipboardSyncState('error');
+    }
+  }
+
+  void _sendClipboardSyncState(String status) {
+    _send(<String, Object?>{
+      'type': 'clipboard_sync_state',
       'token': _tokenController.text.trim(),
       'seq': ++_seq,
       'status': status,

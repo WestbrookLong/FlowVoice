@@ -602,6 +602,12 @@ def create_app(
             raise web.HTTPServiceUnavailable(text="file transfer is not configured")
         return await file_transfer.handle_upload(request)
 
+    async def mobile_clipboard(request: web.Request) -> web.Response:
+        require_token(request)
+        if file_transfer is None:
+            raise web.HTTPServiceUnavailable(text="clipboard sync is not configured")
+        return await file_transfer.handle_mobile_clipboard(request)
+
     async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
         nonlocal text_agent_route_active
         if request.query.get("token") != token:
@@ -637,6 +643,14 @@ def create_app(
                         raise ValueError("screenshot_upload_state.status must be a string")
                     if file_transfer is not None:
                         file_transfer.update_mobile_status(status)
+                    await ws.send_json({"type": "ack", "seq": payload.get("seq")})
+                    continue
+                if message_type == "clipboard_sync_state":
+                    status = payload.get("status")
+                    if not isinstance(status, str):
+                        raise ValueError("clipboard_sync_state.status must be a string")
+                    if file_transfer is not None:
+                        file_transfer.update_mobile_clipboard_status(status)
                     await ws.send_json({"type": "ack", "seq": payload.get("seq")})
                     continue
                 if message_type == "voice_hold_state":
@@ -797,6 +811,7 @@ def create_app(
                 voice_hold_state_callback(False, "service_stopped")
             if not phone_control.has_connections() and file_transfer is not None:
                 file_transfer.update_mobile_status("disconnected")
+                file_transfer.update_mobile_clipboard_status("disconnected")
         log(f"[ws] disconnected: {peer}")
         return ws
 
@@ -807,6 +822,8 @@ def create_app(
     app.router.add_post("/api/text-agent/mode", text_agent_mode)
     app.router.add_post("/api/files/upload", file_upload)
     app.router.add_post("/api/files/upload/", file_upload)
+    app.router.add_post("/api/clipboard", mobile_clipboard)
+    app.router.add_post("/api/clipboard/", mobile_clipboard)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_static("/static", STATIC_DIR)
     return app

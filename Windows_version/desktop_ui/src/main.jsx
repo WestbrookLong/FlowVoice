@@ -70,7 +70,9 @@ const fallbackState = {
     saveDirectory: "",
     imageClipboardMode: "image",
     autoScreenshotUpload: false,
+    autoClipboardSync: false,
     mobileMonitorStatus: "disconnected",
+    mobileClipboardStatus: "disconnected",
     maxUploadMb: 100,
     lastUpload: null,
   },
@@ -698,11 +700,13 @@ function FlowVoiceDesktopConsole() {
 function FileTransferSettings({ settings, onChoose, onClose, onOpenFolder, onSave }) {
   const [mode, setMode] = React.useState(settings.imageClipboardMode || "image");
   const [autoScreenshotUpload, setAutoScreenshotUpload] = React.useState(Boolean(settings.autoScreenshotUpload));
+  const [autoClipboardSync, setAutoClipboardSync] = React.useState(Boolean(settings.autoClipboardSync));
 
   React.useEffect(() => {
     setMode(settings.imageClipboardMode || "image");
     setAutoScreenshotUpload(Boolean(settings.autoScreenshotUpload));
-  }, [settings.imageClipboardMode, settings.autoScreenshotUpload]);
+    setAutoClipboardSync(Boolean(settings.autoClipboardSync));
+  }, [settings.imageClipboardMode, settings.autoScreenshotUpload, settings.autoClipboardSync]);
 
   const monitorLabel = {
     listening: "Phone is monitoring screenshots",
@@ -712,9 +716,18 @@ function FileTransferSettings({ settings, onChoose, onClose, onOpenFolder, onSav
     disconnected: "Phone is not connected",
   }[settings.mobileMonitorStatus] || "Waiting for phone status";
 
+  const clipboardLabel = {
+    listening: "Phone clipboard monitoring is active",
+    accessibility_required: "Enable the Flow Voice accessibility service on the phone",
+    restricted: "Android blocked background clipboard access; accessibility fallback is active",
+    error: "Clipboard monitor error",
+    disabled: "Automatic copy is disabled",
+    disconnected: "Phone is not connected",
+  }[settings.mobileClipboardStatus] || "Waiting for phone status";
+
   return createPortal(
     <div className="fixed inset-0 z-[110] grid place-items-center bg-[#020503]/78 px-6 backdrop-blur-sm">
-      <div className="w-full max-w-xl rounded-[26px] border border-[#2E7447] bg-[#08100D] p-7 shadow-[0_30px_90px_rgba(0,0,0,0.62)]">
+      <div className="max-h-[calc(100vh-48px)] w-full max-w-xl overflow-y-auto rounded-[26px] border border-[#2E7447] bg-[#08100D] p-7 shadow-[0_30px_90px_rgba(0,0,0,0.62)]">
         <div className="flex items-start justify-between gap-6">
           <div>
             <div className="font-mono text-[11px] uppercase tracking-[0.3em] text-[#74E7A5]/70">File Transfer</div>
@@ -765,6 +778,26 @@ function FileTransferSettings({ settings, onChoose, onClose, onOpenFolder, onSav
           </button>
         </div>
 
+        <div className="mt-3 flex items-center justify-between gap-5 rounded-xl border border-[#234531] bg-[#050A07] px-4 py-4">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-[#DDF7E7]">Auto-copy phone text</div>
+            <p className="mt-1 text-xs leading-5 text-[#7FA98E]">{clipboardLabel}</p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoClipboardSync}
+            onClick={() => setAutoClipboardSync((value) => !value)}
+            className={`relative h-7 w-12 shrink-0 rounded-full border transition ${
+              autoClipboardSync ? "border-[#28F58D] bg-[#163A26]" : "border-[#355443] bg-[#0B1510]"
+            }`}
+          >
+            <span className={`absolute top-1 h-[18px] w-[18px] rounded-full bg-[#DDF7E7] transition-all ${
+              autoClipboardSync ? "left-[25px]" : "left-1"
+            }`} />
+          </button>
+        </div>
+
         <div className="mt-7">
           <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-[#6F8D79]">Image Clipboard</div>
           <div className="mt-3 grid grid-cols-2 rounded-xl border border-[#234531] bg-[#050A07] p-1">
@@ -801,6 +834,7 @@ function FileTransferSettings({ settings, onChoose, onClose, onOpenFolder, onSav
             await onSave({
               imageClipboardMode: mode,
               autoScreenshotUpload,
+              autoClipboardSync,
             });
             onClose();
           }}

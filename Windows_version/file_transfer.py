@@ -15,6 +15,7 @@ from aiohttp import web
 
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_UPLOAD_FILES = 20
+MAX_CLIPBOARD_TEXT_CHARS = 50_000
 SETTINGS_PATH = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "FlowBridge" / "file_transfer.json"
 DEFAULT_UPLOAD_DIR = Path.home() / "Downloads" / "FlowVoice Uploads"
 VALID_IMAGE_CLIPBOARD_MODES = {"image", "path"}
@@ -120,11 +121,13 @@ class FileTransferManager:
         copy_text: Callable[[str], None],
         log: Callable[[str], None],
         on_saved: Callable[[], None] | None = None,
+        on_clipboard_copied: Callable[[], None] | None = None,
         settings_path: Path = SETTINGS_PATH,
     ) -> None:
         self.copy_text = copy_text
         self.log = log
         self.on_saved = on_saved
+        self.on_clipboard_copied = on_clipboard_copied
         self.settings_path = settings_path
         self.lock = threading.RLock()
         saved = _load_json(settings_path)
@@ -132,7 +135,9 @@ class FileTransferManager:
         mode = str(saved.get("imageClipboardMode") or "image")
         self.image_clipboard_mode = mode if mode in VALID_IMAGE_CLIPBOARD_MODES else "image"
         self.auto_screenshot_upload = bool(saved.get("autoScreenshotUpload", False))
+        self.auto_clipboard_sync = bool(saved.get("autoClipboardSync", False))
         self.mobile_monitor_status = "disconnected"
+        self.mobile_clipboard_status = "disconnected"
         self.last_upload: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
@@ -141,7 +146,9 @@ class FileTransferManager:
                 "saveDirectory": str(self.save_directory),
                 "imageClipboardMode": self.image_clipboard_mode,
                 "autoScreenshotUpload": self.auto_screenshot_upload,
+                "autoClipboardSync": self.auto_clipboard_sync,
                 "mobileMonitorStatus": self.mobile_monitor_status,
+                "mobileClipboardStatus": self.mobile_clipboard_status,
                 "maxUploadMb": MAX_UPLOAD_BYTES // (1024 * 1024),
                 "lastUpload": dict(self.last_upload) if self.last_upload else None,
             }
@@ -151,12 +158,18 @@ class FileTransferManager:
             return {
                 "type": "file_upload_config",
                 "autoScreenshotUpload": self.auto_screenshot_upload,
+                "autoClipboardSync": self.auto_clipboard_sync,
             }
 
     def update_mobile_status(self, status: str) -> None:
         allowed = {"disabled", "listening", "permission_required", "error", "disconnected"}
         with self.lock:
             self.mobile_monitor_status = status if status in allowed else "error"
+
+    def update_mobile_clipboard_status(self, status: str) -> None:
+        allowed = {"disabled", "listening", "accessibility_required", "restricted", "error", "disconnected"}
+        with self.lock:
+            self.mobile_clipboard_status = status if status in allowed else "error"
 
     def update_settings(self, payload: dict[str, Any]) -> None:
         with self.lock:
@@ -176,14 +189,52 @@ class FileTransferManager:
             auto_upload = payload.get("autoScreenshotUpload")
             if auto_upload is not None:
                 self.auto_screenshot_upload = bool(auto_upload)
+            auto_clipboard = payload.get("autoClipboardSync")
+            if auto_clipboard is not None:
+                self.auto_clipboard_sync = bool(auto_clipboard)
             _atomic_write_json(
                 self.settings_path,
                 {
                     "saveDirectory": str(self.save_directory),
                     "imageClipboardMode": self.image_clipboard_mode,
                     "autoScreenshotUpload": self.auto_screenshot_upload,
+                    "autoClipboardSync": self.auto_clipboard_sync,
                 },
             )
+
+    async def handle_mobile_clipboard(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise web.HTTPBadRequest(text="Invalid JSON body.") from exc
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="Payload must be an object.")
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise web.HTTPBadRequest(text="text must be a string.")
+        text = text[:MAX_CLIPBOARD_TEXT_CHARS]
+        if not text:
+            raise web.HTTPBadRequest(text="Clipboard text is empty.")
+
+        last_error: Exception | None = None
+        for _ in range(6):
+            try:
+                self.copy_text(text)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.05)
+        if last_error is not None:
+            raise web.HTTPInternalServerError(text=f"Clipboard write failed: {last_error}")
+
+        self.log(f"[mobile-clipboard] copied {len(text)} chars")
+        if self.on_clipboard_copied is not None:
+            try:
+                self.on_clipboard_copied()
+            except Exception as exc:
+                self.log(f"[mobile-clipboard] notification failed: {exc}")
+        return web.json_response({"ok": True, "length": len(text)})
 
     def _copy_paths(self, saved: list[dict[str, Any]]) -> None:
         value = "\n".join(item["path"] for item in saved)

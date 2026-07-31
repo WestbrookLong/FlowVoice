@@ -22,6 +22,16 @@ class MainActivity : FlutterActivity() {
             startScreenshotMonitor()
             sendScreenshotUploadState("listening")
         }
+        if (MobileClipboardSync.isEnabled(this)) {
+            VoiceKeyClickAccessibilityService.refreshClipboardMonitoring()
+            sendClipboardSyncState(
+                if (VoiceKeyClickAccessibilityService.isRunning()) {
+                    "listening"
+                } else {
+                    "accessibility_required"
+                },
+            )
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -119,6 +129,20 @@ class MainActivity : FlutterActivity() {
                 "setAutoScreenshotUpload" -> {
                     val enabled = call.argument<Boolean>("enabled") ?: false
                     result.success(applyScreenshotUploadConfig(enabled))
+                }
+                "setAutoClipboardSync" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    MobileClipboardSync.setEnabled(this, enabled)
+                    VoiceKeyClickAccessibilityService.refreshClipboardMonitoring()
+                    result.success(
+                        if (!enabled) {
+                            "disabled"
+                        } else if (VoiceKeyClickAccessibilityService.isRunning()) {
+                            "listening"
+                        } else {
+                            "accessibility_required"
+                        },
+                    )
                 }
                 else -> result.notImplemented()
             }
@@ -236,6 +260,10 @@ class MainActivity : FlutterActivity() {
 
         fun sendScreenshotUploadState(status: String) {
             overlayChannel?.invokeMethod("screenshotUploadState", status)
+        }
+
+        fun sendClipboardSyncState(status: String) {
+            overlayChannel?.invokeMethod("clipboardSyncState", status)
         }
     }
 }
